@@ -43,7 +43,12 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libvosk-dev
+          sudo apt-get install -y libasound2-dev
+          # Download and install Vosk library
+          wget -q https://github.com/alphacep/vosk-api/releases/download/v0.3.45/vosk-linux-x86_64-0.3.45.zip
+          unzip -q vosk-linux-x86_64-0.3.45.zip
+          sudo cp vosk-linux-x86_64-0.3.45/libvosk.so /usr/local/lib/
+          sudo ldconfig
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -59,8 +64,8 @@ jobs:
       - name: Build
         run: cargo build --target ${{ matrix.target }}
 
-      - name: Run unit tests
-        run: cargo test --lib --target ${{ matrix.target }}
+      - name: Run tests
+        run: cargo test --target ${{ matrix.target }}
 
   # Check formatting and lints
   lint:
@@ -77,7 +82,12 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libvosk-dev
+          sudo apt-get install -y libasound2-dev
+          # Download and install Vosk library
+          wget -q https://github.com/alphacep/vosk-api/releases/download/v0.3.45/vosk-linux-x86_64-0.3.45.zip
+          unzip -q vosk-linux-x86_64-0.3.45.zip
+          sudo cp vosk-linux-x86_64-0.3.45/libvosk.so /usr/local/lib/
+          sudo ldconfig
 
       - name: Check formatting
         run: cargo fmt --check
