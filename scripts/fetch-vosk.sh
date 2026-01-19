@@ -92,7 +92,12 @@ download_vosk() {
 
     # Download if not already present
     if [[ ! -f "$zip_file" ]]; then
-        curl -fSL "$url" -o "$zip_file"
+        # Try wget first (more reliable on CI), fall back to curl
+        if command -v wget &> /dev/null; then
+            wget -q "$url" -O "$zip_file"
+        else
+            curl -fSL "$url" -o "$zip_file"
+        fi
     else
         echo "Using cached download: $zip_file"
     fi
