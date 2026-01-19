@@ -13,26 +13,79 @@ env:
   VOSK_VERSION: "0.3.45"
 
 jobs:
-  build:
+  # Determine which platforms to build
+  check-platforms:
+    name: Check platforms
+    runs-on: ubuntu-latest
+    outputs:
+      build-windows: ${{ steps.check.outputs.windows }}
+      build-linux: ${{ steps.check.outputs.linux }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check what to build
+        id: check
+        run: |
+          # Always build all platforms for releases
+          if [ "${{ inputs.release }}" = "true" ]; then
+            echo "windows=true" >> "$GITHUB_OUTPUT"
+            echo "linux=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Check commit message for tags
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+
+          if echo "$COMMIT_MSG" | grep -qi '\[ci all\]'; then
+            echo "windows=true" >> "$GITHUB_OUTPUT"
+            echo "linux=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Default to false, then check for specific triggers
+          BUILD_WINDOWS=false
+          BUILD_LINUX=false
+
+          if echo "$COMMIT_MSG" | grep -qi '\[ci windows\]'; then
+            BUILD_WINDOWS=true
+          fi
+
+          if echo "$COMMIT_MSG" | grep -qi '\[ci linux\]'; then
+            BUILD_LINUX=true
+          fi
+
+          # Check for platform-specific file changes
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+
+          if echo "$CHANGED_FILES" | grep -qE '(src/windows|src/win|\.windows\.|Cargo\.toml|Cargo\.lock)'; then
+            BUILD_WINDOWS=true
+          fi
+
+          if echo "$CHANGED_FILES" | grep -qE '(src/linux|src/vosk|\.linux\.|Cargo\.toml|Cargo\.lock)'; then
+            BUILD_LINUX=true
+          fi
+
+          echo "windows=${BUILD_WINDOWS}" >> "$GITHUB_OUTPUT"
+          echo "linux=${BUILD_LINUX}" >> "$GITHUB_OUTPUT"
+
+          echo "Build Windows: ${BUILD_WINDOWS}"
+          echo "Build Linux: ${BUILD_LINUX}"
+
+  # macOS builds always run
+  build-macos:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            target: x86_64-apple-darwin
+          - target: x86_64-apple-darwin
             name: macOS (x86_64)
-          - os: macos-latest
-            target: aarch64-apple-darwin
+          - target: aarch64-apple-darwin
             name: macOS (ARM64)
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            name: Windows (x86_64)
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            name: Linux (x86_64)
 
     name: Build - ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -47,35 +100,6 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Cache apt packages
-        if: runner.os == 'Linux'
-        uses: awalsh128/cache-apt-pkgs-action@latest
-        with:
-          packages: libasound2-dev
-          version: 1.0
-
-      - name: Cache Vosk library
-        if: runner.os == 'Linux'
-        id: cache-vosk
-        uses: actions/cache@v4
-        with:
-          path: vosk-linux-x86_64-${{ env.VOSK_VERSION }}
-          key: vosk-linux-x86_64-${{ env.VOSK_VERSION }}
-
-      - name: Download Vosk library
-        if: runner.os == 'Linux' && steps.cache-vosk.outputs.cache-hit != 'true'
-        run: |
-          wget -q https://github.com/alphacep/vosk-api/releases/download/v${{ env.VOSK_VERSION }}/vosk-linux-x86_64-${{ env.VOSK_VERSION }}.zip
-          unzip -q vosk-linux-x86_64-${{ env.VOSK_VERSION }}.zip
-
-      - name: Install Vosk library
-        if: runner.os == 'Linux'
-        run: |
-          sudo cp vosk-linux-x86_64-${{ env.VOSK_VERSION }}/libvosk.so /usr/lib/
-          sudo ldconfig
-          echo "LIBRARY_PATH=/usr/lib" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/usr/lib" >> $GITHUB_ENV
-
       - name: Build
         if: ${{ !inputs.release }}
         run: cargo build --target ${{ matrix.target }}
@@ -88,23 +112,131 @@ jobs:
         if: ${{ !inputs.release }}
         run: cargo test --target ${{ matrix.target }}
 
-      - name: Package (Unix)
-        if: ${{ inputs.release && runner.os != 'Windows' }}
+      - name: Package
+        if: ${{ inputs.release }}
         run: |
           cd target/${{ matrix.target }}/release
           tar -czvf ../../../claudio-${{ matrix.target }}.tar.gz claudio
-          cd ../../..
-
-      - name: Package (Windows)
-        if: ${{ inputs.release && runner.os == 'Windows' }}
-        run: |
-          cd target/${{ matrix.target }}/release
-          7z a ../../../claudio-${{ matrix.target }}.zip claudio.exe
-          cd ../../..
 
       - name: Upload artifact
         if: ${{ inputs.release }}
         uses: actions/upload-artifact@v4
         with:
           name: claudio-${{ matrix.target }}
-          path: claudio-${{ matrix.target }}.*
+          path: claudio-${{ matrix.target }}.tar.gz
+
+  # Windows build (conditional)
+  build-windows:
+    name: Build - Windows (x86_64)
+    needs: check-platforms
+    if: needs.check-platforms.outputs.build-windows == 'true'
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc
+
+      - name: Build
+        if: ${{ !inputs.release }}
+        run: cargo build --target x86_64-pc-windows-msvc
+
+      - name: Build release
+        if: ${{ inputs.release }}
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Run tests
+        if: ${{ !inputs.release }}
+        run: cargo test --target x86_64-pc-windows-msvc
+
+      - name: Package
+        if: ${{ inputs.release }}
+        run: |
+          cd target/x86_64-pc-windows-msvc/release
+          7z a ../../../claudio-x86_64-pc-windows-msvc.zip claudio.exe
+
+      - name: Upload artifact
+        if: ${{ inputs.release }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: claudio-x86_64-pc-windows-msvc
+          path: claudio-x86_64-pc-windows-msvc.zip
+
+  # Linux build (conditional)
+  build-linux:
+    name: Build - Linux (x86_64)
+    needs: check-platforms
+    if: needs.check-platforms.outputs.build-linux == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-gnu
+
+      - name: Cache apt packages
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: libasound2-dev
+          version: 1.0
+
+      - name: Cache Vosk library
+        id: cache-vosk
+        uses: actions/cache@v4
+        with:
+          path: vosk-linux-x86_64-${{ env.VOSK_VERSION }}
+          key: vosk-linux-x86_64-${{ env.VOSK_VERSION }}
+
+      - name: Download Vosk library
+        if: steps.cache-vosk.outputs.cache-hit != 'true'
+        run: |
+          wget -q https://github.com/alphacep/vosk-api/releases/download/v${{ env.VOSK_VERSION }}/vosk-linux-x86_64-${{ env.VOSK_VERSION }}.zip
+          unzip -q vosk-linux-x86_64-${{ env.VOSK_VERSION }}.zip
+
+      - name: Install Vosk library
+        run: |
+          sudo cp vosk-linux-x86_64-${{ env.VOSK_VERSION }}/libvosk.so /usr/lib/
+          sudo ldconfig
+          echo "LIBRARY_PATH=/usr/lib" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/usr/lib" >> $GITHUB_ENV
+
+      - name: Build
+        if: ${{ !inputs.release }}
+        run: cargo build --target x86_64-unknown-linux-gnu
+
+      - name: Build release
+        if: ${{ inputs.release }}
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Run tests
+        if: ${{ !inputs.release }}
+        run: cargo test --target x86_64-unknown-linux-gnu
+
+      - name: Package
+        if: ${{ inputs.release }}
+        run: |
+          cd target/x86_64-unknown-linux-gnu/release
+          tar -czvf ../../../claudio-x86_64-unknown-linux-gnu.tar.gz claudio
+
+      - name: Upload artifact
+        if: ${{ inputs.release }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: claudio-x86_64-unknown-linux-gnu
+          path: claudio-x86_64-unknown-linux-gnu.tar.gz
