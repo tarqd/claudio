@@ -60,13 +60,14 @@ pub struct Ui {
     pub spinner_state: SpinnerState,
     spinner_frame: usize,
 
-    // Three text buffers:
-    // 1. Frozen: from confirmed edits, always white, never changes
-    // 2. Settled: from speech recognizer, confirmed, always white
-    // 3. Unsettled: partial/interim from speech, animates cyan→white
+    // Text state:
+    // - frozen_text: from confirmed edits, always white
+    // - text: current speech transcription
+    // - stable_len: chars that match previous render (don't re-animate)
     frozen_text: String,
-    settled_text: String,
-    unsettled_text: String,
+    text: String,
+    prev_text: String,      // Previous text for diff comparison
+    stable_len: usize,      // Characters that are stable (white, no animation)
     animation_start_ms: f32,
 
     // Editing state
@@ -84,8 +85,9 @@ impl Ui {
             spinner_state: SpinnerState::Loading,
             spinner_frame: 0,
             frozen_text: String::new(),
-            settled_text: String::new(),
-            unsettled_text: String::new(),
+            text: String::new(),
+            prev_text: String::new(),
+            stable_len: 0,
             animation_start_ms: 0.0,
             mode: Mode::Listening,
             cursor_pos: 0,
@@ -99,58 +101,60 @@ impl Ui {
         self.spinner_frame = self.spinner_frame.wrapping_add(1);
     }
 
-    /// Update speech text (settled + unsettled) - called during speech recognition.
-    /// Unsettled text animates cyan→white.
-    pub fn set_speech_text(&mut self, settled: &str, unsettled: &str, elapsed_ms: f32) {
+    /// Update speech text - compares with previous to find stable prefix.
+    /// Characters that match previous render stay white; changed/new chars animate.
+    pub fn set_text(&mut self, text: &str, elapsed_ms: f32) {
         // Only update if not in editing mode
         if self.mode == Mode::Editing {
             return;
         }
 
-        let old_unsettled_len = self.unsettled_text.chars().count();
-        let new_unsettled_len = unsettled.chars().count();
+        // Find first differing character between prev_text and new text
+        let common_prefix_len = self.prev_text
+            .chars()
+            .zip(text.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
 
-        // When new unsettled characters appear, adjust animation timing
-        if new_unsettled_len > old_unsettled_len {
-            if old_unsettled_len == 0 {
-                // First unsettled text - start animation now
-                self.animation_start_ms = elapsed_ms;
-            } else {
-                // More unsettled text arrived - adjust start time so new chars animate
-                let new_chars = new_unsettled_len - old_unsettled_len;
-                self.animation_start_ms -= new_chars as f32 * CHAR_FADE_DELAY_MS;
-            }
+        // The stable portion is the common prefix (capped at current stable_len for monotonicity)
+        // But if text changed, we need to recalculate from where it differs
+        let new_stable_len = common_prefix_len.min(text.chars().count());
+
+        // If we have new unstable characters (beyond current stable), start/adjust animation
+        let old_unstable_start = self.stable_len;
+        let new_text_len = text.chars().count();
+
+        if new_text_len > new_stable_len && new_stable_len != old_unstable_start {
+            // Animation boundary changed - reset animation for new unstable region
+            self.animation_start_ms = elapsed_ms;
+        } else if new_text_len > old_unstable_start && new_text_len > self.text.chars().count() {
+            // Text grew but stable boundary didn't change - adjust for new chars
+            let new_chars = new_text_len - self.text.chars().count();
+            self.animation_start_ms -= new_chars as f32 * CHAR_FADE_DELAY_MS;
         }
 
-        self.settled_text = settled.to_string();
-        self.unsettled_text = unsettled.to_string();
+        self.stable_len = new_stable_len;
+        self.prev_text = self.text.clone();
+        self.text = text.to_string();
     }
 
-    /// Set the frozen text (from confirmed edits)
-    pub fn set_frozen_text(&mut self, frozen: &str) {
-        self.frozen_text = frozen.to_string();
-        // Clear settled/unsettled since frozen is now the base
-        self.settled_text.clear();
-        self.unsettled_text.clear();
-        self.animation_start_ms = 0.0;
-    }
-
-    /// Get the full transcription text (frozen + settled + unsettled)
-    pub fn text(&self) -> String {
-        format!("{}{}{}", self.frozen_text, self.settled_text, self.unsettled_text)
+    /// Get the full transcription text (frozen + speech text)
+    pub fn full_text(&self) -> String {
+        format!("{}{}", self.frozen_text, self.text)
     }
 
     /// Check if there's any text content
     pub fn is_empty(&self) -> bool {
-        self.frozen_text.is_empty() && self.settled_text.is_empty() && self.unsettled_text.is_empty()
+        self.frozen_text.is_empty() && self.text.is_empty()
     }
 
     /// Clear transcription and reset animation
     #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.frozen_text.clear();
-        self.settled_text.clear();
-        self.unsettled_text.clear();
+        self.text.clear();
+        self.prev_text.clear();
+        self.stable_len = 0;
         self.animation_start_ms = 0.0;
         self.cursor_pos = 0;
     }
@@ -158,8 +162,9 @@ impl Ui {
     /// Full reset (for restart)
     pub fn reset(&mut self) {
         self.frozen_text.clear();
-        self.settled_text.clear();
-        self.unsettled_text.clear();
+        self.text.clear();
+        self.prev_text.clear();
+        self.stable_len = 0;
         self.animation_start_ms = 0.0;
         self.cursor_pos = 0;
         self.mode = Mode::Listening;
@@ -171,10 +176,11 @@ impl Ui {
     pub fn start_editing(&mut self) {
         self.mode = Mode::Editing;
         // Combine all text into frozen for editing
-        let full_text = self.text();
-        self.frozen_text = full_text;
-        self.settled_text.clear();
-        self.unsettled_text.clear();
+        let full = self.full_text();
+        self.frozen_text = full;
+        self.text.clear();
+        self.prev_text.clear();
+        self.stable_len = 0;
         self.cursor_pos = self.frozen_text.chars().count(); // Cursor at end
     }
 
@@ -200,8 +206,9 @@ impl Ui {
     /// Exit editing mode, discarding changes
     pub fn cancel_editing(&mut self, original: &str) {
         self.frozen_text = original.to_string();
-        self.settled_text.clear();
-        self.unsettled_text.clear();
+        self.text.clear();
+        self.prev_text.clear();
+        self.stable_len = 0;
         self.mode = Mode::Listening;
     }
 
@@ -295,11 +302,9 @@ impl Ui {
         }
     }
 
-    /// Total character count across all buffers
+    /// Total character count (frozen + speech text)
     fn total_char_count(&self) -> usize {
-        self.frozen_text.chars().count()
-            + self.settled_text.chars().count()
-            + self.unsettled_text.chars().count()
+        self.frozen_text.chars().count() + self.text.chars().count()
     }
 
     // --- Rendering ---
@@ -364,29 +369,32 @@ impl Ui {
 
     fn render_transcription(&self, surface: &mut InlineSurface, elapsed_ms: f32, row: &mut usize, col: &mut usize, width: usize, max_rows: usize) {
         let relative_time = elapsed_ms - self.animation_start_ms;
+        let white_attrs = self.attrs(self.white_color());
 
         // Render frozen text (always white)
-        let frozen_attrs = self.attrs(self.white_color());
         for ch in self.frozen_text.chars() {
-            if !self.render_char(surface, ch, frozen_attrs.clone(), row, col, width, max_rows) {
+            if !self.render_char(surface, ch, white_attrs.clone(), row, col, width, max_rows) {
                 return;
             }
         }
 
-        // Render settled text (always white)
-        let settled_attrs = self.attrs(self.white_color());
-        for ch in self.settled_text.chars() {
-            if !self.render_char(surface, ch, settled_attrs.clone(), row, col, width, max_rows) {
-                return;
-            }
-        }
-
-        // Render unsettled text (animates cyan→white)
-        for (i, ch) in self.unsettled_text.chars().enumerate() {
-            let color = self.unsettled_char_color(i, relative_time);
-            let Some(color) = color else { continue }; // Hidden chars (not visible yet)
-            if !self.render_char(surface, ch, self.attrs(color), row, col, width, max_rows) {
-                return;
+        // Render speech text:
+        // - chars < stable_len: white (stable, already animated)
+        // - chars >= stable_len: animate cyan→white
+        for (i, ch) in self.text.chars().enumerate() {
+            if i < self.stable_len {
+                // Stable character - render white
+                if !self.render_char(surface, ch, white_attrs.clone(), row, col, width, max_rows) {
+                    return;
+                }
+            } else {
+                // Unstable character - animate
+                let anim_index = i - self.stable_len;
+                let color = self.char_animation_color(anim_index, relative_time);
+                let Some(color) = color else { continue }; // Hidden chars (not visible yet)
+                if !self.render_char(surface, ch, self.attrs(color), row, col, width, max_rows) {
+                    return;
+                }
             }
         }
     }
@@ -507,7 +515,7 @@ impl Ui {
     // --- Character animation ---
 
     /// Calculate color for unsettled text character (animates cyan→white)
-    fn unsettled_char_color(&self, index: usize, relative_time: f32) -> Option<ColorAttribute> {
+    fn char_animation_color(&self, index: usize, relative_time: f32) -> Option<ColorAttribute> {
         let appear_time = index as f32 * CHAR_FADE_DELAY_MS;
 
         if relative_time < appear_time {

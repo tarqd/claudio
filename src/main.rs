@@ -168,9 +168,9 @@ fn run_app(app: &mut App) -> Result<String> {
         ui.show_placeholder = is_ready && is_listening && ui.is_empty();
         ui.show_controls = is_ready;
 
-        // Update speech text (frozen is managed separately, all new speech is unsettled)
+        // Update speech text - diff with previous determines animation
         let speech_text = app.transcription.lock().unwrap().clone();
-        ui.set_speech_text("", &speech_text, elapsed_ms);
+        ui.set_text(&speech_text, elapsed_ms);
 
         // Check if we need to resize the surface for wrapping
         let (width, current_height) = term.surface().dimensions();
@@ -193,7 +193,7 @@ fn run_app(app: &mut App) -> Result<String> {
             term.terminal().set_cooked_mode().map_err(|e| anyhow::anyhow!("{}", e))?;
 
             // Return the final transcription for output
-            return Ok(ui.text().to_string());
+            return Ok(ui.full_text().to_string());
         }
 
         // Poll input
@@ -236,7 +236,7 @@ fn handle_listening_input(app: &mut App, ui: &mut Ui, key: termwiz::input::KeyEv
         }
         (KeyCode::Char('e'), Modifiers::CTRL) => {
             // Enter editing mode
-            app.edit_original = ui.text().to_string();
+            app.edit_original = ui.full_text().to_string();
             app.stop_listening(); // Pause speech recognition while editing
             ui.start_editing();
         }
