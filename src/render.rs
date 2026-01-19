@@ -3,16 +3,24 @@
 //! Simple inline rendering that works with piped stdout because termwiz
 //! uses /dev/tty on Unix and CONIN$/CONOUT$ on Windows.
 
-use anyhow::Result;
-use termwiz::cell::AttributeChange;
+use termwiz::cell::{Cell, CellAttributes};
 use termwiz::color::ColorAttribute;
-use termwiz::surface::{Change, CursorVisibility, Position};
-use termwiz::terminal::Terminal;
+
+use crate::inline_term::InlineSurface;
 
 const LISTENING_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 const WAITING_FRAMES: [&str; 12] = ["⠋", "⠙", "⠹", "⠸", "⢰", "⣰", "⣠", "⣄", "⣆", "⡆", "⠇", "⠏"];
 const CHAR_DELAY_MS: f32 = 20.0;
-const MAX_LINES: usize = 10;
+
+/// UI state passed to render functions
+pub struct UiState<'a> {
+    pub transcription: &'a str,
+    pub elapsed_ms: f32,
+    pub animation_start_index: usize,
+    pub animation_frame: usize,
+    pub is_ready: bool,
+    pub is_listening: bool,
+}
 
 /// Styled text segment
 struct Segment {
@@ -26,122 +34,40 @@ impl Segment {
     }
 }
 
-/// Render state for the UI
-pub struct RenderState {
-    pub rendered_lines: usize,
-}
-
-impl Default for RenderState {
-    fn default() -> Self {
-        Self { rendered_lines: 0 }
-    }
-}
-
-/// UI state passed to render functions
-pub struct UiState<'a> {
-    pub transcription: &'a str,
-    pub elapsed_ms: f32,
-    pub animation_start_index: usize,
-    pub animation_frame: usize,
-    pub is_ready: bool,
-    pub is_listening: bool,
-}
-
-/// Hide cursor for rendering
-pub fn hide_cursor(term: &mut dyn Terminal) -> Result<()> {
-    term.render(&[Change::CursorVisibility(CursorVisibility::Hidden)])
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    Ok(())
-}
-
-/// Show cursor (for cleanup)
-pub fn show_cursor(term: &mut dyn Terminal) -> Result<()> {
-    term.render(&[Change::CursorVisibility(CursorVisibility::Visible)])
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    Ok(())
-}
-
-/// Render the UI inline at current cursor position
-pub fn render(
-    term: &mut dyn Terminal,
-    state: &mut RenderState,
-    ui: &UiState,
-) -> Result<()> {
-    let mut changes = Vec::new();
-
-    // Move cursor up to start of our rendering area
-    if state.rendered_lines > 0 {
-        changes.push(Change::CursorPosition {
-            x: Position::Absolute(0),
-            y: Position::Relative(-(state.rendered_lines as isize)),
-        });
-    }
+/// Render the UI to an InlineSurface
+pub fn render_to_surface(surface: &mut InlineSurface, ui: &UiState) {
+    // Clear the surface first
+    surface.clear();
 
     let lines = build_lines(ui);
+    let (width, _) = surface.dimensions();
 
-    // Render each line
-    let mut total_lines = 0;
-    for line in &lines {
-        changes.push(Change::ClearToEndOfLine(Default::default()));
+    for (row, segments) in lines.iter().enumerate() {
+        let mut col = 0;
+        for seg in segments {
+            let attrs = CellAttributes::default()
+                .set_foreground(seg.color)
+                .clone();
 
-        for seg in line {
-            changes.push(Change::Attribute(AttributeChange::Foreground(seg.color)));
-            changes.push(Change::Text(seg.text.clone()));
+            for ch in seg.text.chars() {
+                if col >= width {
+                    break;
+                }
+                surface.set_cell(col, row, Cell::new(ch, attrs.clone()));
+                col += 1;
+            }
         }
-
-        changes.push(Change::Attribute(AttributeChange::Foreground(ColorAttribute::Default)));
-        changes.push(Change::Text("\r\n".to_string()));
-        total_lines += 1;
-
-        if total_lines >= MAX_LINES {
-            break;
-        }
     }
-
-    // Clear any leftover lines from previous render
-    while total_lines < state.rendered_lines {
-        changes.push(Change::ClearToEndOfLine(Default::default()));
-        changes.push(Change::Text("\r\n".to_string()));
-        total_lines += 1;
-    }
-
-    state.rendered_lines = lines.len().min(MAX_LINES);
-
-    // Move cursor back to start for next frame
-    if state.rendered_lines > 0 {
-        changes.push(Change::CursorPosition {
-            x: Position::Absolute(0),
-            y: Position::Relative(-(state.rendered_lines as isize)),
-        });
-    }
-
-    term.render(&changes).map_err(|e| anyhow::anyhow!("{}", e))?;
-    Ok(())
 }
 
-/// Clear rendered lines on exit
-pub fn cleanup(term: &mut dyn Terminal, lines: usize) -> Result<()> {
-    let mut changes = Vec::new();
-
-    for _ in 0..lines {
-        changes.push(Change::ClearToEndOfLine(Default::default()));
-        changes.push(Change::CursorPosition {
-            x: Position::Absolute(0),
-            y: Position::Relative(1),
-        });
+/// Returns the number of lines that should be rendered
+#[allow(dead_code)]
+pub fn line_count(ui: &UiState) -> usize {
+    if ui.is_ready {
+        2 // spinner line + status bar
+    } else {
+        1 // just spinner line
     }
-
-    // Return to start
-    if lines > 0 {
-        changes.push(Change::CursorPosition {
-            x: Position::Absolute(0),
-            y: Position::Relative(-(lines as isize)),
-        });
-    }
-
-    term.render(&changes).map_err(|e| anyhow::anyhow!("{}", e))?;
-    show_cursor(term)?;
-    Ok(())
 }
 
 fn build_lines(ui: &UiState) -> Vec<Vec<Segment>> {

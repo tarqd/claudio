@@ -16,12 +16,14 @@ use std::{
 use anyhow::Result;
 use termwiz::caps::Capabilities;
 use termwiz::input::{InputEvent, KeyCode, Modifiers};
-use termwiz::terminal::{SystemTerminal, Terminal as _};
+use termwiz::terminal::{SystemTerminal, Terminal};
 
+mod inline_term;
 mod render;
 mod speech;
 
-use render::{RenderState, UiState};
+use inline_term::InlineTerminal;
+use render::UiState;
 use speech::SpeechRecognizer;
 
 struct App {
@@ -152,21 +154,26 @@ fn main() -> Result<()> {
     std::process::exit(exit_code);
 }
 
+const MAX_LINES: usize = 2;
+
 fn run_app(app: &mut App) -> Result<i32> {
     let tick_rate = Duration::from_millis(33);
 
     // termwiz uses /dev/tty on Unix, CONIN$/CONOUT$ on Windows - works with piped stdout
     let caps = Capabilities::new_from_env().map_err(|e| anyhow::anyhow!("{}", e))?;
-    let mut term = SystemTerminal::new(caps).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let terminal = SystemTerminal::new(caps).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    // Create inline terminal with our fixed height
+    let mut term = InlineTerminal::new(terminal, MAX_LINES)?;
 
     // Raw mode for immediate keys, no alternate screen for inline rendering
-    term.set_raw_mode().map_err(|e| anyhow::anyhow!("{}", e))?;
-    render::hide_cursor(&mut term)?;
-
-    let mut render_state = RenderState::default();
+    term.terminal().set_raw_mode().map_err(|e| anyhow::anyhow!("{}", e))?;
 
     loop {
         app.update();
+
+        // Check for terminal resize
+        term.check_for_resize()?;
 
         // Build UI state (need owned transcription for lifetime)
         let transcription = app.get_transcription();
@@ -179,16 +186,18 @@ fn run_app(app: &mut App) -> Result<i32> {
             is_listening: app.is_listening.load(Ordering::SeqCst),
         };
 
-        render::render(&mut term, &mut render_state, &ui)?;
+        // Render to surface then flush to terminal
+        render::render_to_surface(term.surface(), &ui);
+        term.render()?;
 
         if app.should_quit {
-            render::cleanup(&mut term, render_state.rendered_lines)?;
-            term.set_cooked_mode().map_err(|e| anyhow::anyhow!("{}", e))?;
+            term.cleanup()?;
+            term.terminal().set_cooked_mode().map_err(|e| anyhow::anyhow!("{}", e))?;
             return Ok(app.exit_code);
         }
 
         // Poll input
-        if let Some(event) = term.poll_input(Some(tick_rate)).map_err(|e| anyhow::anyhow!("{}", e))? {
+        if let Some(event) = term.terminal().poll_input(Some(tick_rate)).map_err(|e| anyhow::anyhow!("{}", e))? {
             handle_input(app, event)?;
         }
     }
