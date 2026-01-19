@@ -332,9 +332,19 @@ impl<T: Terminal> InlineTerminal<T> {
         let size = self.terminal.get_screen_size().map_err(|e| anyhow::anyhow!("{}", e))?;
         let (width, height) = self.surface.dimensions();
         if width != size.cols {
+            // Terminal resized - our position tracking is now invalid
+            // Scroll past any mess by printing newlines, then start fresh
+            if self.rendered_height > 0 {
+                let mut changes = Vec::new();
+                // Print newlines to scroll past old content
+                for _ in 0..self.rendered_height {
+                    changes.push(Change::Text("\n".to_string()));
+                }
+                self.terminal.render(&changes).map_err(|e| anyhow::anyhow!("{}", e))?;
+            }
+
             self.surface.resize(size.cols, height);
             self.surface.invalidate();
-            // Reset tracking - our position assumptions are invalid after resize
             self.rendered_height = 0;
             self.cursor_row = 0;
             Ok(true)
