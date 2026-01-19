@@ -89,24 +89,7 @@ impl App {
     /// Get full transcription (frozen prefix + new speech)
     fn get_transcription(&self) -> String {
         let new_text = self.transcription.lock().unwrap().clone();
-        if self.frozen_text.is_empty() {
-            new_text
-        } else if new_text.is_empty() {
-            self.frozen_text.clone()
-        } else {
-            format!("{} {}", self.frozen_text, new_text)
-        }
-    }
-
-    /// Get the length of frozen text in characters
-    #[allow(dead_code)]
-    fn frozen_len(&self) -> usize {
-        if self.frozen_text.is_empty() {
-            0
-        } else {
-            // +1 for the space we add between frozen and new text
-            self.frozen_text.chars().count() + 1
-        }
+        format!("{}{}", self.frozen_text, new_text)
     }
 }
 
@@ -277,11 +260,14 @@ fn handle_editing_input(app: &mut App, ui: &mut Ui, key: termwiz::input::KeyEven
         (KeyCode::Enter, Modifiers::NONE) => {
             // Freeze the edited text - it becomes the new prefix
             app.frozen_text = ui.text().to_string();
+            // Ensure trailing space for separation from new speech
+            if !app.frozen_text.is_empty() && !app.frozen_text.ends_with(' ') {
+                app.frozen_text.push(' ');
+            }
             // Clear the live transcription buffer for new speech
             app.transcription.lock().unwrap().clear();
             // Tell UI to freeze current text (no animation)
-            // +1 for the space we'll add between frozen and new text
-            let frozen_len = app.frozen_text.chars().count() + 1;
+            let frozen_len = app.frozen_text.chars().count();
             ui.finish_editing_with_freeze(frozen_len);
             // Resume listening
             app.start_listening()?;
