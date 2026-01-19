@@ -20,11 +20,11 @@ use termwiz::terminal::{SystemTerminal, Terminal};
 
 mod inline_term;
 mod speech;
-mod widgets;
+mod ui;
 
 use inline_term::InlineTerminal;
 use speech::SpeechRecognizer;
-use widgets::{ClaudioUi, SpinnerState};
+use ui::{SpinnerState, Ui};
 
 struct App {
     transcription: Arc<Mutex<String>>,
@@ -144,14 +144,14 @@ fn run_app(app: &mut App) -> Result<String> {
     term.terminal().set_raw_mode().map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // Initialize UI
-    let mut ui = ClaudioUi::new();
+    let mut ui = Ui::new();
 
     loop {
         let elapsed_ms = app.start_time.elapsed().as_millis() as f32;
 
         // Update spinner frame
         if last_tick.elapsed() >= Duration::from_millis(100) {
-            ui.spinner.tick();
+            ui.tick();
             last_tick = Instant::now();
         }
 
@@ -159,7 +159,7 @@ fn run_app(app: &mut App) -> Result<String> {
         let is_ready = app.is_ready.load(Ordering::SeqCst);
         let is_listening = app.is_listening.load(Ordering::SeqCst);
 
-        ui.spinner.state = if !is_ready {
+        ui.spinner_state = if !is_ready {
             SpinnerState::Loading
         } else if is_listening {
             SpinnerState::Listening
@@ -167,12 +167,12 @@ fn run_app(app: &mut App) -> Result<String> {
             SpinnerState::Idle
         };
 
-        ui.placeholder.visible = is_ready && is_listening && ui.transcription.text.is_empty();
-        ui.controls.visible = is_ready;
+        ui.show_placeholder = is_ready && is_listening && ui.text().is_empty();
+        ui.show_controls = is_ready;
 
         // Update transcription
         let transcription = app.get_transcription();
-        ui.transcription.set_text(transcription, elapsed_ms);
+        ui.set_text(transcription, elapsed_ms);
 
         // Check if we need to resize the surface for wrapping
         let (width, current_height) = term.surface().dimensions();
@@ -194,7 +194,7 @@ fn run_app(app: &mut App) -> Result<String> {
             term.terminal().set_cooked_mode().map_err(|e| anyhow::anyhow!("{}", e))?;
 
             // Return the final transcription for output
-            return Ok(ui.final_text().to_string());
+            return Ok(ui.text().to_string());
         }
 
         // Poll input
