@@ -41,6 +41,7 @@ Display is always `frozen_text + live_transcription`. This enables:
 |-----|--------|
 | Enter | Submit full transcription |
 | Ctrl+E | Enter inline edit mode |
+| Ctrl+Shift+E | Open $EDITOR directly (hidden shortcut) |
 | Ctrl+R | Restart (clear everything) |
 | Ctrl+C | Cancel (exit 130) |
 
