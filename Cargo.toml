@@ -2,7 +2,7 @@
 name = "claudio"
 version = "0.1.0"
 edition = "2021"
-description = "Voice-to-text CLI using macOS Speech framework"
+description = "Voice-to-text CLI with native speech recognition"
 
 [dependencies]
 # TUI
@@ -38,6 +38,20 @@ objc2-avf-audio = { version = "0.3", features = [
     "block2",
 ] }
 block2 = "0.6"
+
+# Windows Speech Recognition (only on Windows)
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Media_SpeechRecognition",
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+] }
+
+# Linux Speech Recognition (Vosk + cpal for audio capture)
+[target.'cfg(target_os = "linux")'.dependencies]
+vosk = "0.3"
+cpal = "0.15"
 
 [profile.release]
 opt-level = 3

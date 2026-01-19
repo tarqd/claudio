@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: macOS (x86_64)
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: macOS (ARM64)
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: Windows (x86_64)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: Linux (x86_64)
+
+    name: Build - ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+          # Download and install Vosk library
+          wget -q https://github.com/alphacep/vosk-api/releases/download/v0.3.45/vosk-linux-x86_64-0.3.45.zip
+          unzip -q vosk-linux-x86_64-0.3.45.zip
+          sudo cp vosk-linux-x86_64-0.3.45/libvosk.so /usr/lib/
+          sudo ldconfig
+          echo "LIBRARY_PATH=/usr/lib" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/usr/lib" >> $GITHUB_ENV
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: Build
+        run: cargo build --target ${{ matrix.target }}
+
+      - name: Run tests
+        run: cargo test --target ${{ matrix.target }}
+
+  # Check formatting and lints
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+          # Download and install Vosk library
+          wget -q https://github.com/alphacep/vosk-api/releases/download/v0.3.45/vosk-linux-x86_64-0.3.45.zip
+          unzip -q vosk-linux-x86_64-0.3.45.zip
+          sudo cp vosk-linux-x86_64-0.3.45/libvosk.so /usr/lib/
+          sudo ldconfig
+          echo "LIBRARY_PATH=/usr/lib" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/usr/lib" >> $GITHUB_ENV
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy (Linux - mock impl)
+        run: cargo clippy -- -D warnings

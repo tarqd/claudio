@@ -32,7 +32,7 @@ use speech::SpeechRecognizer;
 const LISTENING_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 const WAITING_FRAMES: [&str; 12] = ["⠋", "⠙", "⠹", "⠸", "⢰", "⣰", "⣠", "⣄", "⣆", "⡆", "⠇", "⠏"];
 const CHAR_DELAY_MS: f32 = 20.0; // Delay between each character appearing
-const SHIMMER_SPEED: f32 = 1.0;  // Speed of the shimmer wave (slower = more subtle)
+const SHIMMER_SPEED: f32 = 1.0; // Speed of the shimmer wave (slower = more subtle)
 
 struct App {
     transcription: Arc<Mutex<String>>,
@@ -74,7 +74,11 @@ impl App {
         let is_listening = Arc::clone(&self.is_listening);
         let is_ready = Arc::clone(&self.is_ready);
 
-        self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
+        self.recognizer = Some(SpeechRecognizer::new(
+            transcription,
+            is_listening,
+            is_ready,
+        )?);
         self.recognizer.as_mut().unwrap().start()?;
 
         Ok(())
@@ -105,7 +109,11 @@ impl App {
         let is_listening = Arc::clone(&self.is_listening);
         let is_ready = Arc::clone(&self.is_ready);
 
-        self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
+        self.recognizer = Some(SpeechRecognizer::new(
+            transcription,
+            is_listening,
+            is_ready,
+        )?);
         self.recognizer.as_mut().unwrap().start()?;
 
         Ok(())
@@ -224,7 +232,8 @@ fn run_app(app: &mut App) -> Result<()> {
 
         // Estimate lines needed: transcription + 1 line for status
         let content_length = transcription.len();
-        let transcription_lines = ((content_length as f32 / terminal_width as f32).ceil() as u16).max(1);
+        let transcription_lines =
+            ((content_length as f32 / terminal_width as f32).ceil() as u16).max(1);
         let needed_height = (transcription_lines + 1).min(10);
 
         // Recreate terminal if height changed
@@ -251,7 +260,8 @@ fn run_app(app: &mut App) -> Result<()> {
         if let Some(ref mut term) = terminal {
             term.draw(|f| {
                 let transcription = app.transcription.lock().unwrap().clone();
-                let elapsed_since_update = app.transcription_start_time.elapsed().as_millis() as f32;
+                let elapsed_since_update =
+                    app.transcription_start_time.elapsed().as_millis() as f32;
                 let is_ready = app.is_ready.load(Ordering::SeqCst);
                 let is_listening = app.is_listening.load(Ordering::SeqCst);
                 let transcription_spans = build_transcription_spans(
@@ -267,8 +277,8 @@ fn run_app(app: &mut App) -> Result<()> {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Min(1),     // Transcription
-                        Constraint::Length(1),  // Status line
+                        Constraint::Min(1),    // Transcription
+                        Constraint::Length(1), // Status line
                     ])
                     .split(f.area());
 
@@ -277,32 +287,42 @@ fn run_app(app: &mut App) -> Result<()> {
                 let is_listening = app.is_listening.load(Ordering::SeqCst);
                 let (spinner, spinner_style) = if !is_ready {
                     // Warming up
-                    (WAITING_FRAMES[app.animation_frame],
-                     Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))
+                    (
+                        WAITING_FRAMES[app.animation_frame],
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD),
+                    )
                 } else if is_listening {
                     // Ready and listening - subtle pulsing red dot
-                    let pulse_progress = (app.animation_frame as f32 / LISTENING_FRAMES.len() as f32) * std::f32::consts::PI;
+                    let pulse_progress = (app.animation_frame as f32
+                        / LISTENING_FRAMES.len() as f32)
+                        * std::f32::consts::PI;
                     let pulse = (pulse_progress.sin() + 1.0) / 2.0; // 0.0 to 1.0
 
                     // Subtle pulse - stays mostly bright red with gentle dimming
                     let min_brightness = 200;
                     let max_brightness = 255;
-                    let brightness = (min_brightness as f32 + pulse * (max_brightness - min_brightness) as f32) as u8;
+                    let brightness = (min_brightness as f32
+                        + pulse * (max_brightness - min_brightness) as f32)
+                        as u8;
 
-                    ("●", Style::default().fg(Color::Rgb(brightness, 0, 0)).add_modifier(Modifier::BOLD))
+                    (
+                        "●",
+                        Style::default()
+                            .fg(Color::Rgb(brightness, 0, 0))
+                            .add_modifier(Modifier::BOLD),
+                    )
                 } else {
                     // Not listening
                     ("○", Style::default().fg(Color::DarkGray))
                 };
 
-                let mut line_spans = vec![
-                    Span::styled(spinner, spinner_style),
-                    Span::raw(" "),
-                ];
+                let mut line_spans = vec![Span::styled(spinner, spinner_style), Span::raw(" ")];
                 line_spans.extend(transcription_spans);
 
-                let transcription_para = Paragraph::new(Line::from(line_spans))
-                    .wrap(Wrap { trim: false });
+                let transcription_para =
+                    Paragraph::new(Line::from(line_spans)).wrap(Wrap { trim: false });
                 f.render_widget(transcription_para, chunks[0]);
 
                 // Render status line - only show controls when ready
@@ -310,12 +330,16 @@ fn run_app(app: &mut App) -> Result<()> {
                     vec![
                         Span::styled(
                             "Enter",
-                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(" finish • ", Style::default().fg(Color::DarkGray)),
                         Span::styled(
                             "Ctrl+R",
-                            Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Color::Blue)
+                                .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(" restart • ", Style::default().fg(Color::DarkGray)),
                         Span::styled(
