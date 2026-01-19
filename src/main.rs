@@ -4,7 +4,7 @@
 
 use std::{
     env,
-    io::{stderr, Write},
+    io::{stderr, IsTerminal, Read, Write},
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -19,7 +19,7 @@ use crossterm::{
     terminal,
 };
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
@@ -33,6 +33,78 @@ const LISTENING_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 const WAITING_FRAMES: [&str; 12] = ["⠋", "⠙", "⠹", "⠸", "⢰", "⣰", "⣠", "⣄", "⣆", "⡆", "⠇", "⠏"];
 const CHAR_DELAY_MS: f32 = 20.0; // Delay between each character appearing
 const SHIMMER_SPEED: f32 = 1.0; // Speed of the shimmer wave (slower = more subtle)
+
+/// Query cursor position via /dev/tty directly, bypassing stdout.
+/// This allows the TUI to work when stdout is piped (e.g., `claudio | less`).
+/// Uses /dev/tty which is the controlling terminal regardless of redirections.
+/// Returns (column, row) with 0-based indexing.
+#[cfg(unix)]
+fn cursor_position_via_tty() -> Result<(u16, u16)> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Open /dev/tty for both reading and writing
+    // This gives us direct access to the controlling terminal
+    let mut tty = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOCTTY) // Don't make it controlling terminal
+        .open("/dev/tty")?;
+
+    // Write cursor position query: ESC [ 6 n
+    tty.write_all(b"\x1B[6n")?;
+    tty.flush()?;
+
+    // Read response: ESC [ row ; col R
+    let mut buf = [0u8; 32];
+    let mut i = 0;
+
+    let start = Instant::now();
+    let timeout = Duration::from_secs(2);
+
+    loop {
+        if start.elapsed() > timeout {
+            anyhow::bail!("Timeout waiting for cursor position response");
+        }
+
+        if let Ok(1) = tty.read(&mut buf[i..i + 1]) {
+            if buf[i] == b'R' {
+                break;
+            }
+            i += 1;
+            if i >= buf.len() {
+                anyhow::bail!("Cursor position response too long");
+            }
+        }
+    }
+
+    // Parse response: ESC [ row ; col R
+    let response = std::str::from_utf8(&buf[..i])?;
+    let esc_pos = response.find('\x1B').unwrap_or(0);
+    let coords = &response[esc_pos..];
+
+    if !coords.starts_with("\x1B[") {
+        anyhow::bail!("Invalid cursor position response: {}", response);
+    }
+
+    let coords = &coords[2..]; // Skip ESC [
+    let parts: Vec<&str> = coords.split(';').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("Invalid cursor position format: {}", coords);
+    }
+
+    let row: u16 = parts[0].parse()?;
+    let col: u16 = parts[1].parse()?;
+
+    // Terminal reports 1-based, convert to 0-based
+    Ok((col.saturating_sub(1), row.saturating_sub(1)))
+}
+
+/// Fallback for non-Unix systems - just return (0, 0) and hope for the best
+#[cfg(not(unix))]
+fn cursor_position_via_tty() -> Result<(u16, u16)> {
+    Ok((0, 0))
+}
 
 struct App {
     transcription: Arc<Mutex<String>>,
@@ -209,17 +281,43 @@ fn main() -> Result<()> {
 fn run_app(app: &mut App) -> Result<()> {
     let tick_rate = Duration::from_millis(33); // ~30 FPS
 
-    // Use stderr for TUI output
-    let backend = ratatui::backend::CrosstermBackend::new(stderr());
+    // Check if stdout is piped - if so, we need to use stderr for cursor position queries
+    // because crossterm's Viewport::Inline queries cursor position via stdout
+    let stdout_is_tty = std::io::stdout().is_terminal();
+
+    // Get initial cursor position and terminal width
+    // We need raw mode enabled BEFORE querying cursor position so the response is readable
     terminal::enable_raw_mode()?;
-    let terminal_instance = ratatui::Terminal::with_options(
-        backend,
-        TerminalOptions {
-            viewport: Viewport::Inline(2),
-        },
-    )?;
+
+    let (_initial_cursor_col, initial_cursor_row) = if stdout_is_tty {
+        // stdout is a TTY, crossterm's normal cursor query will work
+        // We don't need to query here, Viewport::Inline handles it
+        (0, 0) // These won't be used
+    } else {
+        // stdout is piped, query cursor position via /dev/tty
+        cursor_position_via_tty()?
+    };
+
+    let (terminal_width, terminal_height) = terminal::size()?;
+
+    // Create initial viewport
+    let initial_height = 2u16;
+    let viewport = if stdout_is_tty {
+        Viewport::Inline(initial_height)
+    } else {
+        // Use Fixed viewport with position from our stderr-based query
+        // Ensure we don't overflow past terminal bottom
+        let y = initial_cursor_row.min(terminal_height.saturating_sub(initial_height));
+        Viewport::Fixed(Rect::new(0, y, terminal_width, initial_height))
+    };
+
+    let backend = ratatui::backend::CrosstermBackend::new(stderr());
+    let terminal_instance = ratatui::Terminal::with_options(backend, TerminalOptions { viewport })?;
     let mut terminal = Some(terminal_instance);
-    let mut last_height = 2u16;
+    let mut last_height = initial_height;
+
+    // Track the fixed viewport row for non-TTY mode
+    let fixed_viewport_row = initial_cursor_row;
 
     loop {
         // Update state
@@ -245,12 +343,18 @@ fn run_app(app: &mut App) -> Result<()> {
             // Recreate terminal with stderr backend
             let backend = ratatui::backend::CrosstermBackend::new(stderr());
             terminal::enable_raw_mode()?;
-            let terminal_instance = ratatui::Terminal::with_options(
-                backend,
-                TerminalOptions {
-                    viewport: Viewport::Inline(needed_height),
-                },
-            )?;
+
+            let viewport = if stdout_is_tty {
+                Viewport::Inline(needed_height)
+            } else {
+                // Recalculate Fixed viewport with new height
+                let (term_width, term_height) = terminal::size()?;
+                let y = fixed_viewport_row.min(term_height.saturating_sub(needed_height));
+                Viewport::Fixed(Rect::new(0, y, term_width, needed_height))
+            };
+
+            let terminal_instance =
+                ratatui::Terminal::with_options(backend, TerminalOptions { viewport })?;
             terminal = Some(terminal_instance);
             last_height = needed_height;
             app.viewport_height = needed_height;

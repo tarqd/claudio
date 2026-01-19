@@ -194,6 +194,7 @@ dependencies = [
  "block2",
  "cpal",
  "crossterm",
+ "libc",
  "objc2",
  "objc2-avf-audio",
  "objc2-foundation",
