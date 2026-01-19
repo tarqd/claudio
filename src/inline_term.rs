@@ -355,17 +355,56 @@ impl<T: Terminal> InlineTerminal<T> {
         let mut changes = Vec::new();
 
         let (_, height) = self.surface.dimensions();
+        let old_height = self.rendered_height;
+
+        // Hide cursor during render
+        changes.push(Change::CursorVisibility(CursorVisibility::Hidden));
 
         // Move cursor up to row 0 of our region (from wherever cursor was left)
-        if self.rendered_height > 0 && self.cursor_row > 0 {
+        if old_height > 0 && self.cursor_row > 0 {
             changes.push(Change::CursorPosition {
                 x: Position::Absolute(0),
                 y: Position::Relative(-(self.cursor_row as isize)),
             });
         }
 
-        // Hide cursor during render
-        changes.push(Change::CursorVisibility(CursorVisibility::Hidden));
+        // Clear the entire old rendered region first
+        if old_height > 0 {
+            for i in 0..old_height {
+                changes.push(Change::CursorPosition {
+                    x: Position::Absolute(0),
+                    y: if i == 0 { Position::Relative(0) } else { Position::Relative(1) },
+                });
+                changes.push(Change::ClearToEndOfLine(ColorAttribute::Default));
+            }
+            // Go back to row 0
+            if old_height > 1 {
+                changes.push(Change::CursorPosition {
+                    x: Position::Absolute(0),
+                    y: Position::Relative(-((old_height - 1) as isize)),
+                });
+            }
+        }
+
+        // If new height is greater, claim more terminal space with newlines
+        if height > old_height {
+            // Go to end of current position
+            if old_height > 0 {
+                changes.push(Change::CursorPosition {
+                    x: Position::Absolute(0),
+                    y: Position::Relative((old_height - 1) as isize),
+                });
+            }
+            // Print newlines to scroll and create space
+            for _ in old_height..height {
+                changes.push(Change::Text("\n".to_string()));
+            }
+            // Go back to row 0
+            changes.push(Change::CursorPosition {
+                x: Position::Absolute(0),
+                y: Position::Relative(-((height - 1) as isize)),
+            });
+        }
 
         // Render each line
         for row in 0..height {
@@ -375,8 +414,7 @@ impl<T: Terminal> InlineTerminal<T> {
                 y: if row == 0 { Position::Relative(0) } else { Position::Relative(1) },
             });
 
-            // Clear the line first, then draw all content
-            changes.push(Change::ClearToEndOfLine(ColorAttribute::Default));
+            // Draw content (line already cleared above or is new space)
             changes.extend(self.surface.get_line_content(row));
         }
 
