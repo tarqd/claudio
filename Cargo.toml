@@ -1,0 +1,44 @@
+[package]
+name = "claudio"
+version = "0.1.0"
+edition = "2021"
+description = "Voice-to-text CLI using macOS Speech framework"
+
+[dependencies]
+# TUI
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+tachyonfx = "0.9"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# Error handling
+anyhow = "1.0"
+
+# macOS Speech framework (only on macOS)
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSLocale", "NSArray", "block2"] }
+objc2-speech = { version = "0.3", features = [
+    "SFSpeechRecognizer",
+    "SFSpeechRecognitionTask",
+    "SFSpeechRecognitionRequest",
+    "SFSpeechRecognitionResult",
+    "SFTranscription",
+    "SFTranscriptionSegment",
+    "block2",
+    "objc2-avf-audio",
+] }
+objc2-avf-audio = { version = "0.3", features = [
+    "AVAudioEngine",
+    "AVAudioNode",
+    "AVAudioIONode",
+    "AVAudioFormat",
+    "AVAudioBuffer",
+    "AVAudioTime",
+    "AVAudioTypes",
+    "block2",
+] }
+block2 = "0.6"
+
+[profile.release]
+opt-level = 3
+lto = true
