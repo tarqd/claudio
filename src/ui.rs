@@ -60,10 +60,14 @@ pub struct Ui {
     pub spinner_state: SpinnerState,
     spinner_frame: usize,
 
-    // Transcription with animation
-    text: String,
+    // Three text buffers:
+    // 1. Frozen: from confirmed edits, always white, never changes
+    // 2. Settled: from speech recognizer, confirmed, always white
+    // 3. Unsettled: partial/interim from speech, animates cyan→white
+    frozen_text: String,
+    settled_text: String,
+    unsettled_text: String,
     animation_start_ms: f32,
-    frozen_len: usize, // Characters that are "frozen" (no animation, always white)
 
     // Editing state
     pub mode: Mode,
@@ -79,9 +83,10 @@ impl Ui {
         Self {
             spinner_state: SpinnerState::Loading,
             spinner_frame: 0,
-            text: String::new(),
+            frozen_text: String::new(),
+            settled_text: String::new(),
+            unsettled_text: String::new(),
             animation_start_ms: 0.0,
-            frozen_len: 0,
             mode: Mode::Listening,
             cursor_pos: 0,
             show_placeholder: false,
@@ -94,55 +99,83 @@ impl Ui {
         self.spinner_frame = self.spinner_frame.wrapping_add(1);
     }
 
-    /// Update transcription text, tracking animation timing
-    pub fn set_text(&mut self, text: String, elapsed_ms: f32) {
+    /// Update speech text (settled + unsettled) - called during speech recognition.
+    /// Unsettled text animates cyan→white.
+    pub fn set_speech_text(&mut self, settled: &str, unsettled: &str, elapsed_ms: f32) {
         // Only update if not in editing mode
         if self.mode == Mode::Editing {
             return;
         }
 
-        // Start animation timer when new (non-frozen) text arrives
-        let new_char_count = text.chars().count();
-        let old_char_count = self.text.chars().count();
-        if new_char_count > old_char_count && new_char_count > self.frozen_len {
-            // New characters appeared beyond frozen portion - reset animation for them
-            if old_char_count <= self.frozen_len {
-                // First new character after frozen text
+        let old_unsettled_len = self.unsettled_text.chars().count();
+        let new_unsettled_len = unsettled.chars().count();
+
+        // When new unsettled characters appear, adjust animation timing
+        if new_unsettled_len > old_unsettled_len {
+            if old_unsettled_len == 0 {
+                // First unsettled text - start animation now
                 self.animation_start_ms = elapsed_ms;
+            } else {
+                // More unsettled text arrived - adjust start time so new chars animate
+                let new_chars = new_unsettled_len - old_unsettled_len;
+                self.animation_start_ms -= new_chars as f32 * CHAR_FADE_DELAY_MS;
             }
         }
-        self.text = text;
+
+        self.settled_text = settled.to_string();
+        self.unsettled_text = unsettled.to_string();
     }
 
-    /// Get the transcription text
-    pub fn text(&self) -> &str {
-        &self.text
+    /// Set the frozen text (from confirmed edits)
+    pub fn set_frozen_text(&mut self, frozen: &str) {
+        self.frozen_text = frozen.to_string();
+        // Clear settled/unsettled since frozen is now the base
+        self.settled_text.clear();
+        self.unsettled_text.clear();
+        self.animation_start_ms = 0.0;
+    }
+
+    /// Get the full transcription text (frozen + settled + unsettled)
+    pub fn text(&self) -> String {
+        format!("{}{}{}", self.frozen_text, self.settled_text, self.unsettled_text)
+    }
+
+    /// Check if there's any text content
+    pub fn is_empty(&self) -> bool {
+        self.frozen_text.is_empty() && self.settled_text.is_empty() && self.unsettled_text.is_empty()
     }
 
     /// Clear transcription and reset animation
     #[allow(dead_code)]
     pub fn clear(&mut self) {
-        self.text.clear();
+        self.frozen_text.clear();
+        self.settled_text.clear();
+        self.unsettled_text.clear();
         self.animation_start_ms = 0.0;
-        self.frozen_len = 0;
         self.cursor_pos = 0;
     }
 
     /// Full reset (for restart)
     pub fn reset(&mut self) {
-        self.text.clear();
+        self.frozen_text.clear();
+        self.settled_text.clear();
+        self.unsettled_text.clear();
         self.animation_start_ms = 0.0;
-        self.frozen_len = 0;
         self.cursor_pos = 0;
         self.mode = Mode::Listening;
     }
 
     // --- Editing mode ---
 
-    /// Enter editing mode
+    /// Enter editing mode - combines all text into frozen for editing
     pub fn start_editing(&mut self) {
         self.mode = Mode::Editing;
-        self.cursor_pos = self.text.chars().count(); // Cursor at end
+        // Combine all text into frozen for editing
+        let full_text = self.text();
+        self.frozen_text = full_text;
+        self.settled_text.clear();
+        self.unsettled_text.clear();
+        self.cursor_pos = self.frozen_text.chars().count(); // Cursor at end
     }
 
     /// Exit editing mode, keeping changes
@@ -152,14 +185,23 @@ impl Ui {
     }
 
     /// Exit editing mode and freeze the current text (no animation)
-    pub fn finish_editing_with_freeze(&mut self, frozen_len: usize) {
-        self.frozen_len = frozen_len;
+    pub fn finish_editing_with_freeze(&mut self) {
+        // frozen_text already contains the edited text from start_editing
         self.mode = Mode::Listening;
     }
 
-    /// Exit editing mode, discarding changes (would need to store original)
+    /// Ensure frozen text ends with a space (for separation from new speech)
+    pub fn ensure_trailing_space(&mut self) {
+        if !self.frozen_text.is_empty() && !self.frozen_text.ends_with(' ') {
+            self.frozen_text.push(' ');
+        }
+    }
+
+    /// Exit editing mode, discarding changes
     pub fn cancel_editing(&mut self, original: &str) {
-        self.text = original.to_string();
+        self.frozen_text = original.to_string();
+        self.settled_text.clear();
+        self.unsettled_text.clear();
         self.mode = Mode::Listening;
     }
 
@@ -172,7 +214,7 @@ impl Ui {
 
     /// Move cursor right
     pub fn cursor_right(&mut self) {
-        let len = self.text.chars().count();
+        let len = self.frozen_text.chars().count();
         if self.cursor_pos < len {
             self.cursor_pos += 1;
         }
@@ -185,13 +227,13 @@ impl Ui {
 
     /// Move cursor to end
     pub fn cursor_end(&mut self) {
-        self.cursor_pos = self.text.chars().count();
+        self.cursor_pos = self.frozen_text.chars().count();
     }
 
-    /// Insert character at cursor
+    /// Insert character at cursor (editing mode only, modifies frozen_text)
     pub fn insert_char(&mut self, ch: char) {
         let byte_pos = self.char_to_byte_index(self.cursor_pos);
-        self.text.insert(byte_pos, ch);
+        self.frozen_text.insert(byte_pos, ch);
         self.cursor_pos += 1;
     }
 
@@ -201,26 +243,26 @@ impl Ui {
             self.cursor_pos -= 1;
             let byte_pos = self.char_to_byte_index(self.cursor_pos);
             let next_byte = self.char_to_byte_index(self.cursor_pos + 1);
-            self.text.drain(byte_pos..next_byte);
+            self.frozen_text.drain(byte_pos..next_byte);
         }
     }
 
     /// Delete character at cursor (delete key)
     pub fn delete_forward(&mut self) {
-        let len = self.text.chars().count();
+        let len = self.frozen_text.chars().count();
         if self.cursor_pos < len {
             let byte_pos = self.char_to_byte_index(self.cursor_pos);
             let next_byte = self.char_to_byte_index(self.cursor_pos + 1);
-            self.text.drain(byte_pos..next_byte);
+            self.frozen_text.drain(byte_pos..next_byte);
         }
     }
 
     fn char_to_byte_index(&self, char_idx: usize) -> usize {
-        self.text
+        self.frozen_text
             .char_indices()
             .nth(char_idx)
             .map(|(i, _)| i)
-            .unwrap_or(self.text.len())
+            .unwrap_or(self.frozen_text.len())
     }
 
     // --- Layout ---
@@ -233,7 +275,7 @@ impl Ui {
 
         // First line has spinner (2 chars), rest are full width
         let first_line_width = width.saturating_sub(2);
-        let char_count = self.text.chars().count();
+        let char_count = self.total_char_count();
 
         let content_lines = if char_count == 0 || first_line_width == 0 {
             1
@@ -251,6 +293,13 @@ impl Ui {
         } else {
             content_lines
         }
+    }
+
+    /// Total character count across all buffers
+    fn total_char_count(&self) -> usize {
+        self.frozen_text.chars().count()
+            + self.settled_text.chars().count()
+            + self.unsettled_text.chars().count()
     }
 
     // --- Rendering ---
@@ -277,7 +326,7 @@ impl Ui {
         let content_rows = if self.show_controls { height.saturating_sub(1) } else { height };
 
         // Render content based on mode
-        if self.text.is_empty() {
+        if self.is_empty() {
             if self.show_placeholder {
                 self.render_text(surface, "Speak now...", self.attrs(self.dim_color()), &mut row, &mut col, width, content_rows);
             }
@@ -316,48 +365,59 @@ impl Ui {
     fn render_transcription(&self, surface: &mut InlineSurface, elapsed_ms: f32, row: &mut usize, col: &mut usize, width: usize, max_rows: usize) {
         let relative_time = elapsed_ms - self.animation_start_ms;
 
-        for (i, ch) in self.text.chars().enumerate() {
-            if *row >= max_rows {
-                break;
+        // Render frozen text (always white)
+        let frozen_attrs = self.attrs(self.white_color());
+        for ch in self.frozen_text.chars() {
+            if !self.render_char(surface, ch, frozen_attrs.clone(), row, col, width, max_rows) {
+                return;
             }
+        }
 
-            // Calculate character color based on animation
-            let color = self.char_color(i, relative_time);
-            let Some(color) = color else { continue }; // Hidden chars
-
-            // Wrap to next line if needed
-            if *col >= width {
-                *row += 1;
-                *col = 0;
-                if *row >= max_rows {
-                    break;
-                }
+        // Render settled text (always white)
+        let settled_attrs = self.attrs(self.white_color());
+        for ch in self.settled_text.chars() {
+            if !self.render_char(surface, ch, settled_attrs.clone(), row, col, width, max_rows) {
+                return;
             }
+        }
 
-            surface.set_cell(*col, *row, Cell::new(ch, self.attrs(color)));
-            *col += 1;
+        // Render unsettled text (animates cyan→white)
+        for (i, ch) in self.unsettled_text.chars().enumerate() {
+            let color = self.unsettled_char_color(i, relative_time);
+            let Some(color) = color else { continue }; // Hidden chars (not visible yet)
+            if !self.render_char(surface, ch, self.attrs(color), row, col, width, max_rows) {
+                return;
+            }
         }
     }
 
+    /// Render a single character, handling wrapping. Returns false if we've exceeded max_rows.
+    fn render_char(&self, surface: &mut InlineSurface, ch: char, attrs: CellAttributes, row: &mut usize, col: &mut usize, width: usize, max_rows: usize) -> bool {
+        if *row >= max_rows {
+            return false;
+        }
+
+        if *col >= width {
+            *row += 1;
+            *col = 0;
+            if *row >= max_rows {
+                return false;
+            }
+        }
+
+        surface.set_cell(*col, *row, Cell::new(ch, attrs));
+        *col += 1;
+        true
+    }
+
     fn render_editable(&self, surface: &mut InlineSurface, row: &mut usize, col: &mut usize, width: usize, max_rows: usize) {
-        // In edit mode, render all text in white (settled)
+        // In edit mode, render frozen_text in white (that's where edits happen)
         let attrs = self.attrs(self.white_color());
 
-        for ch in self.text.chars() {
-            if *row >= max_rows {
-                break;
+        for ch in self.frozen_text.chars() {
+            if !self.render_char(surface, ch, attrs.clone(), row, col, width, max_rows) {
+                return;
             }
-
-            if *col >= width {
-                *row += 1;
-                *col = 0;
-                if *row >= max_rows {
-                    break;
-                }
-            }
-
-            surface.set_cell(*col, *row, Cell::new(ch, attrs.clone()));
-            *col += 1;
         }
     }
 
@@ -446,15 +506,9 @@ impl Ui {
 
     // --- Character animation ---
 
-    fn char_color(&self, index: usize, relative_time: f32) -> Option<ColorAttribute> {
-        // Frozen characters are always white (no animation)
-        if index < self.frozen_len {
-            return Some(self.white_color());
-        }
-
-        // For non-frozen characters, calculate animation based on their position after frozen text
-        let anim_index = index - self.frozen_len;
-        let appear_time = anim_index as f32 * CHAR_FADE_DELAY_MS;
+    /// Calculate color for unsettled text character (animates cyan→white)
+    fn unsettled_char_color(&self, index: usize, relative_time: f32) -> Option<ColorAttribute> {
+        let appear_time = index as f32 * CHAR_FADE_DELAY_MS;
 
         if relative_time < appear_time {
             return None; // Not visible yet

@@ -35,7 +35,6 @@ struct App {
     start_time: Instant,
     recognizer: Option<SpeechRecognizer>,
     edit_original: String,  // Saved text when entering edit mode
-    frozen_text: String,    // Confirmed text that won't be overwritten or animated
 }
 
 impl App {
@@ -49,7 +48,6 @@ impl App {
             start_time: Instant::now(),
             recognizer: None,
             edit_original: String::new(),
-            frozen_text: String::new(),
         }
     }
 
@@ -73,7 +71,6 @@ impl App {
     fn restart(&mut self) -> Result<()> {
         self.stop_listening();
         self.transcription.lock().unwrap().clear();
-        self.frozen_text.clear();
         self.start_time = Instant::now();
         self.is_ready.store(false, Ordering::SeqCst);
 
@@ -84,12 +81,6 @@ impl App {
         self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
         self.recognizer.as_mut().unwrap().start()?;
         Ok(())
-    }
-
-    /// Get full transcription (frozen prefix + new speech)
-    fn get_transcription(&self) -> String {
-        let new_text = self.transcription.lock().unwrap().clone();
-        format!("{}{}", self.frozen_text, new_text)
     }
 }
 
@@ -174,12 +165,12 @@ fn run_app(app: &mut App) -> Result<String> {
             SpinnerState::Idle
         };
 
-        ui.show_placeholder = is_ready && is_listening && ui.text().is_empty();
+        ui.show_placeholder = is_ready && is_listening && ui.is_empty();
         ui.show_controls = is_ready;
 
-        // Update transcription
-        let transcription = app.get_transcription();
-        ui.set_text(transcription, elapsed_ms);
+        // Update speech text (frozen is managed separately, all new speech is unsettled)
+        let speech_text = app.transcription.lock().unwrap().clone();
+        ui.set_speech_text("", &speech_text, elapsed_ms);
 
         // Check if we need to resize the surface for wrapping
         let (width, current_height) = term.surface().dimensions();
@@ -258,17 +249,12 @@ fn handle_editing_input(app: &mut App, ui: &mut Ui, key: termwiz::input::KeyEven
     match (key.key, key.modifiers) {
         // Confirm edit
         (KeyCode::Enter, Modifiers::NONE) => {
-            // Freeze the edited text - it becomes the new prefix
-            app.frozen_text = ui.text().to_string();
+            // Finish editing and freeze the text (UI manages the buffers)
+            ui.finish_editing_with_freeze();
             // Ensure trailing space for separation from new speech
-            if !app.frozen_text.is_empty() && !app.frozen_text.ends_with(' ') {
-                app.frozen_text.push(' ');
-            }
+            ui.ensure_trailing_space();
             // Clear the live transcription buffer for new speech
             app.transcription.lock().unwrap().clear();
-            // Tell UI to freeze current text (no animation)
-            let frozen_len = app.frozen_text.chars().count();
-            ui.finish_editing_with_freeze(frozen_len);
             // Resume listening
             app.start_listening()?;
         }
