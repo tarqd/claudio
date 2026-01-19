@@ -172,20 +172,23 @@ fn run_app(app: &mut App) -> Result<String> {
         let speech_text = app.transcription.lock().unwrap().clone();
         ui.set_text(&speech_text, elapsed_ms);
 
-        // Check if we need to resize the surface for wrapping
-        let (width, current_height) = term.surface().dimensions();
-        let needed_lines = ui.lines_needed(width).min(MAX_LINES);
-        if needed_lines != current_height {
-            term.resize_height(needed_lines)?;
-        }
-
-        // Check for terminal width resize
+        // Check for terminal width resize (debounced)
         term.check_for_resize()?;
 
-        // Render UI to surface
-        ui.render(term.surface(), elapsed_ms);
-        let cursor_pos = ui.cursor_screen_position(width);
-        term.render_with_cursor(cursor_pos)?;
+        // Skip rendering while resize is settling
+        if !term.is_resizing() {
+            // Check if we need to resize the surface for wrapping
+            let (width, current_height) = term.surface().dimensions();
+            let needed_lines = ui.lines_needed(width).min(MAX_LINES);
+            if needed_lines != current_height {
+                term.resize_height(needed_lines)?;
+            }
+
+            // Render UI to surface
+            ui.render(term.surface(), elapsed_ms);
+            let cursor_pos = ui.cursor_screen_position(width);
+            term.render_with_cursor(cursor_pos)?;
+        }
 
         if app.should_quit {
             // Clean up the UI

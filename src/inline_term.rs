@@ -334,12 +334,15 @@ impl<T: Terminal> InlineTerminal<T> {
     }
 
     /// Check for terminal resize and update surface width (debounced)
+    /// Returns true if resize was applied, false otherwise.
+    /// Use `is_resizing()` to check if rendering should be paused.
     pub fn check_for_resize(&mut self) -> Result<bool> {
         let size = self.terminal.get_screen_size().map_err(|e| anyhow::anyhow!("{}", e))?;
         let (current_width, height) = self.surface.dimensions();
 
-        // Check if terminal width changed
-        if size.cols != current_width {
+        // Check if terminal width changed from what we're rendering at
+        let target_width = self.pending_resize.map(|(w, _)| w).unwrap_or(current_width);
+        if size.cols != target_width {
             // Width changed - record/update the pending resize
             self.pending_resize = Some((size.cols, Instant::now()));
             return Ok(false); // Don't act yet, wait for debounce
@@ -369,6 +372,11 @@ impl<T: Terminal> InlineTerminal<T> {
         }
 
         Ok(false)
+    }
+
+    /// Returns true if a resize is pending (rendering should be paused)
+    pub fn is_resizing(&self) -> bool {
+        self.pending_resize.is_some()
     }
 
     /// Resize the height of the inline terminal
