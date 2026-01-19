@@ -3,8 +3,7 @@
 //! A CLI tool that listens via microphone and transcribes speech in real-time.
 
 use std::{
-    env,
-    fs,
+    env, fs,
     io::{stderr, Write},
     process::Command,
     sync::{
@@ -152,7 +151,11 @@ impl<'a> App<'a> {
             let is_listening = Arc::clone(&self.is_listening);
             let is_ready = Arc::clone(&self.is_ready);
 
-            self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
+            self.recognizer = Some(SpeechRecognizer::new(
+                transcription,
+                is_listening,
+                is_ready,
+            )?);
             self.recognizer.as_mut().unwrap().start()?;
         } else {
             // Pause - stop listening, freeze live text
@@ -215,11 +218,16 @@ impl<'a> App<'a> {
         // Populate textarea with current transcription
         let current_text = self.full_transcription();
         let lines: Vec<String> = current_text.lines().map(String::from).collect();
-        self.textarea = TextArea::new(if lines.is_empty() { vec![String::new()] } else { lines });
+        self.textarea = TextArea::new(if lines.is_empty() {
+            vec![String::new()]
+        } else {
+            lines
+        });
 
         // Style the textarea
         self.textarea.set_cursor_line_style(Style::default());
-        self.textarea.set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+        self.textarea
+            .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
 
         // Move cursor to end
         self.textarea.move_cursor(tui_textarea::CursorMove::Bottom);
@@ -248,7 +256,11 @@ impl<'a> App<'a> {
         let is_listening = Arc::clone(&self.is_listening);
         let is_ready = Arc::clone(&self.is_ready);
 
-        self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
+        self.recognizer = Some(SpeechRecognizer::new(
+            transcription,
+            is_listening,
+            is_ready,
+        )?);
         self.recognizer.as_mut().unwrap().start()?;
 
         self.mode = AppMode::Recording;
@@ -273,7 +285,11 @@ impl<'a> App<'a> {
         let is_listening = Arc::clone(&self.is_listening);
         let is_ready = Arc::clone(&self.is_ready);
 
-        self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
+        self.recognizer = Some(SpeechRecognizer::new(
+            transcription,
+            is_listening,
+            is_ready,
+        )?);
         self.recognizer.as_mut().unwrap().start()?;
 
         self.mode = AppMode::Recording;
@@ -315,9 +331,14 @@ impl<'a> App<'a> {
                 // Update textarea with edited content
                 let edited = fs::read_to_string(&temp_path).unwrap_or(current_text);
                 let lines: Vec<String> = edited.lines().map(String::from).collect();
-                self.textarea = TextArea::new(if lines.is_empty() { vec![String::new()] } else { lines });
+                self.textarea = TextArea::new(if lines.is_empty() {
+                    vec![String::new()]
+                } else {
+                    lines
+                });
                 self.textarea.set_cursor_line_style(Style::default());
-                self.textarea.set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+                self.textarea
+                    .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
                 self.textarea.move_cursor(tui_textarea::CursorMove::Bottom);
                 self.textarea.move_cursor(tui_textarea::CursorMove::End);
             }
@@ -393,7 +414,11 @@ impl<'a> App<'a> {
         let is_listening = Arc::clone(&self.is_listening);
         let is_ready = Arc::clone(&self.is_ready);
 
-        self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
+        self.recognizer = Some(SpeechRecognizer::new(
+            transcription,
+            is_listening,
+            is_ready,
+        )?);
         self.recognizer.as_mut().unwrap().start()?;
 
         Ok(())
@@ -480,7 +505,7 @@ fn run_app(app: &mut App) -> Result<()> {
         // Calculate needed height based on content and mode
         let terminal_width = terminal::size()?.0 as usize;
 
-let content_lines: u16 = match app.mode {
+        let content_lines: u16 = match app.mode {
             AppMode::Recording => {
                 let full_transcription = app.full_transcription();
                 full_transcription
@@ -490,7 +515,9 @@ let content_lines: u16 = match app.mode {
             }
             AppMode::Editing => {
                 // Textarea handles its own line count
-                app.textarea.lines().iter()
+                app.textarea
+                    .lines()
+                    .iter()
                     .map(|line| ((line.len() as f32 / terminal_width as f32).ceil() as u16).max(1))
                     .sum::<u16>()
                     .max(1)
@@ -525,8 +552,8 @@ let content_lines: u16 = match app.mode {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Min(1),     // Main content
-                        Constraint::Length(1),  // Status line
+                        Constraint::Min(1),    // Main content
+                        Constraint::Length(1), // Status line
                     ])
                     .split(f.area());
 
@@ -534,7 +561,8 @@ let content_lines: u16 = match app.mode {
                     AppMode::Recording => {
                         let frozen_text = app.frozen_text.clone();
                         let live_transcription = app.live_transcription.lock().unwrap().clone();
-                        let elapsed_since_update = app.transcription_start_time.elapsed().as_millis() as f32;
+                        let elapsed_since_update =
+                            app.transcription_start_time.elapsed().as_millis() as f32;
                         let is_ready = app.is_ready.load(Ordering::SeqCst);
                         let is_listening = app.is_listening.load(Ordering::SeqCst);
 
@@ -558,26 +586,30 @@ let content_lines: u16 = match app.mode {
                             ("○", Style::default().fg(Color::DarkGray))
                         } else if !is_ready {
                             // Warming up - braille spinner
-                            (WAITING_FRAMES[app.animation_frame % WAITING_FRAMES.len()],
-                             Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))
+                            (
+                                WAITING_FRAMES[app.animation_frame % WAITING_FRAMES.len()],
+                                Style::default()
+                                    .fg(Color::DarkGray)
+                                    .add_modifier(Modifier::BOLD),
+                            )
                         } else if is_listening {
                             // Recording - cycle through dot symbols in red
-                            (LISTENING_FRAMES[app.animation_frame % LISTENING_FRAMES.len()],
-                             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+                            (
+                                LISTENING_FRAMES[app.animation_frame % LISTENING_FRAMES.len()],
+                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                            )
                         } else {
                             // Not listening (recognition ended)
                             ("○", Style::default().fg(Color::DarkGray))
                         };
 
-                        let mut line_spans = vec![
-                            Span::styled(spinner, spinner_style),
-                            Span::raw(" "),
-                        ];
+                        let mut line_spans =
+                            vec![Span::styled(spinner, spinner_style), Span::raw(" ")];
                         line_spans.extend(frozen_spans);
                         line_spans.extend(live_spans);
 
-                        let transcription_para = Paragraph::new(Line::from(line_spans))
-                            .wrap(Wrap { trim: false });
+                        let transcription_para =
+                            Paragraph::new(Line::from(line_spans)).wrap(Wrap { trim: false });
                         f.render_widget(transcription_para, chunks[0]);
                     }
                     AppMode::Editing => {
@@ -592,24 +624,64 @@ let content_lines: u16 = match app.mode {
                         let is_ready = app.is_ready.load(Ordering::SeqCst);
                         if app.is_paused {
                             vec![
-                                Span::styled("PAUSED", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+                                Span::styled(
+                                    "PAUSED",
+                                    Style::default()
+                                        .fg(Color::DarkGray)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
                                 Span::styled(" • ", Style::default().fg(Color::DarkGray)),
-                                Span::styled("Space", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                                Span::styled(
+                                    "Space",
+                                    Style::default()
+                                        .fg(Color::Cyan)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
                                 Span::styled(" resume • ", Style::default().fg(Color::DarkGray)),
-                                Span::styled("Enter", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                                Span::styled(
+                                    "Enter",
+                                    Style::default()
+                                        .fg(Color::Yellow)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
                                 Span::styled(" finish • ", Style::default().fg(Color::DarkGray)),
-                                Span::styled("Ctrl+E", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                                Span::styled(
+                                    "Ctrl+E",
+                                    Style::default()
+                                        .fg(Color::Green)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
                                 Span::styled(" edit", Style::default().fg(Color::DarkGray)),
                             ]
                         } else if is_ready {
                             vec![
-                                Span::styled("Enter", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                                Span::styled(
+                                    "Enter",
+                                    Style::default()
+                                        .fg(Color::Yellow)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
                                 Span::styled(" finish • ", Style::default().fg(Color::DarkGray)),
-                                Span::styled("Space", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                                Span::styled(
+                                    "Space",
+                                    Style::default()
+                                        .fg(Color::Cyan)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
                                 Span::styled(" pause • ", Style::default().fg(Color::DarkGray)),
-                                Span::styled("Ctrl+E", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                                Span::styled(
+                                    "Ctrl+E",
+                                    Style::default()
+                                        .fg(Color::Green)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
                                 Span::styled(" edit • ", Style::default().fg(Color::DarkGray)),
-                                Span::styled("Ctrl+D", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                                Span::styled(
+                                    "Ctrl+D",
+                                    Style::default()
+                                        .fg(Color::Blue)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
                                 Span::styled(" discard", Style::default().fg(Color::DarkGray)),
                             ]
                         } else {
@@ -618,11 +690,24 @@ let content_lines: u16 = match app.mode {
                     }
                     AppMode::Editing => {
                         vec![
-                            Span::styled("Ctrl+S", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                "Ctrl+S",
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
                             Span::styled(" done • ", Style::default().fg(Color::DarkGray)),
-                            Span::styled("Ctrl+E", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                "Ctrl+E",
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
                             Span::styled(" $EDITOR • ", Style::default().fg(Color::DarkGray)),
-                            Span::styled("Ctrl+D", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                "Ctrl+D",
+                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                            ),
                             Span::styled(" discard", Style::default().fg(Color::DarkGray)),
                         ]
                     }
@@ -693,7 +778,9 @@ let content_lines: u16 = match app.mode {
                                 code: KeyCode::Char('E'),
                                 modifiers,
                                 ..
-                            } if modifiers.contains(KeyModifiers::CONTROL) && modifiers.contains(KeyModifiers::SHIFT) => {
+                            } if modifiers.contains(KeyModifiers::CONTROL)
+                                && modifiers.contains(KeyModifiers::SHIFT) =>
+                            {
                                 // Direct to $EDITOR (power user shortcut)
                                 if let Err(e) = app.open_external_editor_direct() {
                                     eprintln!("Failed to open editor: {}", e);
@@ -734,9 +821,9 @@ let content_lines: u16 = match app.mode {
                                 code: KeyCode::Char('d'),
                                 modifiers: KeyModifiers::CONTROL,
                                 ..
-                            } | KeyEvent {
-                                code: KeyCode::Esc,
-                                ..
+                            }
+                            | KeyEvent {
+                                code: KeyCode::Esc, ..
                             } => {
                                 // Discard edits and resume recording
                                 if let Err(e) = app.cancel_edit_mode() {
