@@ -19,7 +19,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
         run: |
-          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
             url="https://github.com/${{ github.repository }}/releases/download/v${VERSION}/claudio-${target}.tar.gz"
             echo "Downloading ${url}..."
             curl -sL "${url}" -o "claudio-${target}.tar.gz"
@@ -37,7 +37,6 @@ jobs:
           VERSION: ${{ inputs.version }}
           SHA256_AARCH64_APPLE_DARWIN: ${{ steps.checksums.outputs.SHA256_AARCH64_APPLE_DARWIN }}
           SHA256_X86_64_APPLE_DARWIN: ${{ steps.checksums.outputs.SHA256_X86_64_APPLE_DARWIN }}
-          SHA256_X86_64_UNKNOWN_LINUX_GNU: ${{ steps.checksums.outputs.SHA256_X86_64_UNKNOWN_LINUX_GNU }}
         run: |
           envsubst < Formula/claudio.rb.template > claudio.rb
 
