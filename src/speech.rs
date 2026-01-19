@@ -17,7 +17,7 @@ mod macos {
     use super::*;
     use block2::RcBlock;
     use objc2::rc::Retained;
-    use objc2::ClassType;
+    use objc2::AllocAnyThread;
     use objc2_avf_audio::{AVAudioEngine, AVAudioPCMBuffer, AVAudioTime};
     use objc2_foundation::{NSError, NSLocale};
     use objc2_speech::{
@@ -129,11 +129,14 @@ mod macos {
             );
 
             unsafe {
+                // Convert RcBlock to raw pointer for the C API
+                let tap_block_ptr =
+                    &*tap_block as *const block2::Block<_> as *mut block2::Block<_>;
                 input_node.installTapOnBus_bufferSize_format_block(
                     0,
                     1024,
                     Some(&format),
-                    &*tap_block,
+                    tap_block_ptr,
                 );
             }
 
