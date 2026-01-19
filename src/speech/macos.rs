@@ -14,8 +14,8 @@ use objc2::AllocAnyThread;
 use objc2_avf_audio::{AVAudioEngine, AVAudioPCMBuffer, AVAudioTime};
 use objc2_foundation::{NSError, NSLocale, NSOperationQueue};
 use objc2_speech::{
-    SFSpeechAudioBufferRecognitionRequest, SFSpeechRecognitionResult,
-    SFSpeechRecognitionTask, SFSpeechRecognizer, SFSpeechRecognizerAuthorizationStatus,
+    SFSpeechAudioBufferRecognitionRequest, SFSpeechRecognitionResult, SFSpeechRecognitionTask,
+    SFSpeechRecognizer, SFSpeechRecognizerAuthorizationStatus,
 };
 use std::ptr::NonNull;
 
@@ -84,11 +84,12 @@ impl SpeechRecognizerImpl {
             let auth_granted = Arc::new(Mutex::new(None));
             let auth_granted_clone = Arc::clone(&auth_granted);
 
-            let handler = block2::RcBlock::new(move |status: SFSpeechRecognizerAuthorizationStatus| {
-                if let Ok(mut granted) = auth_granted_clone.lock() {
-                    *granted = Some(status.0 == 3);
-                }
-            });
+            let handler =
+                block2::RcBlock::new(move |status: SFSpeechRecognizerAuthorizationStatus| {
+                    if let Ok(mut granted) = auth_granted_clone.lock() {
+                        *granted = Some(status.0 == 3);
+                    }
+                });
 
             unsafe {
                 SFSpeechRecognizer::requestAuthorization(&handler);
@@ -193,8 +194,7 @@ impl SpeechRecognizerImpl {
 
         unsafe {
             // Convert RcBlock to raw pointer for the C API
-            let tap_block_ptr =
-                &*tap_block as *const block2::Block<_> as *mut block2::Block<_>;
+            let tap_block_ptr = &*tap_block as *const block2::Block<_> as *mut block2::Block<_>;
             input_node.installTapOnBus_bufferSize_format_block(
                 0,
                 1024,

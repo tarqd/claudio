@@ -99,12 +99,8 @@ impl SpeechRecognizerImpl {
         stop_signal: Arc<AtomicBool>,
     ) -> Result<()> {
         // Load the Vosk model
-        let model = Model::new(model_path.to_string_lossy()).ok_or_else(|| {
-            anyhow!(
-                "Failed to load Vosk model from {}",
-                model_path.display()
-            )
-        })?;
+        let model = Model::new(model_path.to_string_lossy())
+            .ok_or_else(|| anyhow!("Failed to load Vosk model from {}", model_path.display()))?;
 
         // Set up audio capture
         let host = cpal::default_host();
@@ -117,9 +113,8 @@ impl SpeechRecognizerImpl {
         let channels = config.channels() as usize;
 
         // Create recognizer with the sample rate
-        let mut recognizer = Recognizer::new(&model, sample_rate).ok_or_else(|| {
-            anyhow!("Failed to create Vosk recognizer")
-        })?;
+        let mut recognizer = Recognizer::new(&model, sample_rate)
+            .ok_or_else(|| anyhow!("Failed to create Vosk recognizer"))?;
 
         recognizer.set_words(true);
         recognizer.set_partial_words(true);
