@@ -59,11 +59,11 @@ jobs:
           # Check for platform-specific file changes
           CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
 
-          if echo "$CHANGED_FILES" | grep -qE '(src/windows|src/win|\.windows\.|Cargo\.toml|Cargo\.lock)'; then
+          if echo "$CHANGED_FILES" | grep -qE '(src/.*windows\.rs|src/speech/windows|Cargo\.toml|Cargo\.lock)'; then
             BUILD_WINDOWS=true
           fi
 
-          if echo "$CHANGED_FILES" | grep -qE '(src/linux|src/vosk|\.linux\.|Cargo\.toml|Cargo\.lock)'; then
+          if echo "$CHANGED_FILES" | grep -qE '(src/.*linux\.rs|src/speech/linux|Cargo\.toml|Cargo\.lock)'; then
             BUILD_LINUX=true
           fi
 
