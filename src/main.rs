@@ -33,7 +33,7 @@ use tui_textarea::TextArea;
 mod speech;
 use speech::SpeechRecognizer;
 
-const LISTENING_FRAMES: [&str; 4] = ["∙", "●", "◎", "◉"];
+const LISTENING_FRAMES: [&str; 3] = ["●", "◎", "◉"];
 const WAITING_FRAMES: [&str; 12] = ["⠋", "⠙", "⠹", "⠸", "⢰", "⣰", "⣠", "⣄", "⣆", "⡆", "⠇", "⠏"];
 const CHAR_DELAY_MS: f32 = 20.0; // Delay between each character appearing
 const SHIMMER_SPEED: f32 = 1.0;  // Speed of the shimmer wave (slower = more subtle)
