@@ -24,7 +24,7 @@ mod ui;
 
 use inline_term::InlineTerminal;
 use speech::SpeechRecognizer;
-use ui::{SpinnerState, Ui};
+use ui::{Mode, SpinnerState, Ui};
 
 struct App {
     transcription: Arc<Mutex<String>>,
@@ -34,6 +34,7 @@ struct App {
     exit_code: i32,
     start_time: Instant,
     recognizer: Option<SpeechRecognizer>,
+    edit_original: String, // Saved text when entering edit mode
 }
 
 impl App {
@@ -46,6 +47,7 @@ impl App {
             exit_code: 0,
             start_time: Instant::now(),
             recognizer: None,
+            edit_original: String::new(),
         }
     }
 
@@ -186,7 +188,8 @@ fn run_app(app: &mut App) -> Result<String> {
 
         // Render UI to surface
         ui.render(term.surface(), elapsed_ms);
-        term.render()?;
+        let cursor_pos = ui.cursor_screen_position(width);
+        term.render_with_cursor(cursor_pos)?;
 
         if app.should_quit {
             // Clean up the UI
@@ -199,33 +202,78 @@ fn run_app(app: &mut App) -> Result<String> {
 
         // Poll input
         if let Some(event) = term.terminal().poll_input(Some(tick_rate)).map_err(|e| anyhow::anyhow!("{}", e))? {
-            handle_input(app, event)?;
+            handle_input(app, &mut ui, event)?;
         }
     }
 }
 
-fn handle_input(app: &mut App, event: InputEvent) -> Result<()> {
-    if let InputEvent::Key(key) = event {
-        match (key.key, key.modifiers) {
-            (KeyCode::Enter, Modifiers::NONE) => {
-                app.stop_listening();
-                app.should_quit = true;
-                app.exit_code = 0;
-            }
-            (KeyCode::Char('c'), Modifiers::CTRL) => {
-                app.stop_listening();
-                app.should_quit = true;
-                app.exit_code = 130;
-            }
-            (KeyCode::Char('r'), Modifiers::CTRL) => {
-                if let Err(e) = app.restart() {
-                    eprintln!("Failed to restart: {}", e);
-                    app.should_quit = true;
-                    app.exit_code = 1;
-                }
-            }
-            _ => {}
+fn handle_input(app: &mut App, ui: &mut Ui, event: InputEvent) -> Result<()> {
+    let InputEvent::Key(key) = event else {
+        return Ok(());
+    };
+
+    match ui.mode {
+        Mode::Listening => handle_listening_input(app, ui, key),
+        Mode::Editing => handle_editing_input(app, ui, key),
+    }
+}
+
+fn handle_listening_input(app: &mut App, ui: &mut Ui, key: termwiz::input::KeyEvent) -> Result<()> {
+    match (key.key, key.modifiers) {
+        (KeyCode::Enter, Modifiers::NONE) => {
+            app.stop_listening();
+            app.should_quit = true;
+            app.exit_code = 0;
         }
+        (KeyCode::Char('c'), Modifiers::CTRL) => {
+            app.stop_listening();
+            app.should_quit = true;
+            app.exit_code = 130;
+        }
+        (KeyCode::Char('r'), Modifiers::CTRL) => {
+            if let Err(e) = app.restart() {
+                eprintln!("Failed to restart: {}", e);
+                app.should_quit = true;
+                app.exit_code = 1;
+            }
+        }
+        (KeyCode::Char('e'), Modifiers::CTRL) => {
+            // Enter editing mode
+            app.edit_original = ui.text().to_string();
+            app.stop_listening(); // Pause speech recognition while editing
+            ui.start_editing();
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_editing_input(app: &mut App, ui: &mut Ui, key: termwiz::input::KeyEvent) -> Result<()> {
+    match (key.key, key.modifiers) {
+        // Confirm edit
+        (KeyCode::Enter, Modifiers::NONE) => {
+            // Copy edited text back to app transcription
+            *app.transcription.lock().unwrap() = ui.text().to_string();
+            ui.finish_editing();
+            // Resume listening
+            app.start_listening()?;
+        }
+        // Cancel edit
+        (KeyCode::Escape, Modifiers::NONE) => {
+            ui.cancel_editing(&app.edit_original);
+            // Resume listening
+            app.start_listening()?;
+        }
+        // Navigation
+        (KeyCode::LeftArrow, Modifiers::NONE) => ui.cursor_left(),
+        (KeyCode::RightArrow, Modifiers::NONE) => ui.cursor_right(),
+        (KeyCode::Home, Modifiers::NONE) => ui.cursor_home(),
+        (KeyCode::End, Modifiers::NONE) => ui.cursor_end(),
+        // Editing
+        (KeyCode::Backspace, Modifiers::NONE) => ui.delete_back(),
+        (KeyCode::Delete, Modifiers::NONE) => ui.delete_forward(),
+        (KeyCode::Char(ch), Modifiers::NONE | Modifiers::SHIFT) => ui.insert_char(ch),
+        _ => {}
     }
     Ok(())
 }

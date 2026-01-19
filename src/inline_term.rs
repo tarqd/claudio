@@ -315,7 +315,8 @@ impl<T: Terminal> InlineTerminal<T> {
 
     /// Render the surface to the terminal using line-by-line approach.
     /// This uses relative cursor positioning to work inline.
-    pub fn render(&mut self) -> Result<()> {
+    /// If `cursor_pos` is Some, shows the cursor at that (col, row) position.
+    pub fn render_with_cursor(&mut self, cursor_pos: Option<(usize, usize)>) -> Result<()> {
         let mut changes = Vec::new();
 
         // Move cursor up to our rendering region if we've rendered before
@@ -351,12 +352,23 @@ impl<T: Terminal> InlineTerminal<T> {
             changes.extend(line_changes);
         }
 
-        // Move back to start of our region
-        if height > 0 {
+        // Position cursor and show it if requested
+        if let Some((col, row)) = cursor_pos {
+            // Move to cursor position (relative from end of last line)
+            let rows_back = height.saturating_sub(1).saturating_sub(row);
             changes.push(Change::CursorPosition {
-                x: Position::Absolute(0),
-                y: Position::Relative(-((height - 1) as isize)),
+                x: Position::Absolute(col),
+                y: Position::Relative(-(rows_back as isize)),
             });
+            changes.push(Change::CursorVisibility(CursorVisibility::Visible));
+        } else {
+            // Move back to start of our region, cursor stays hidden
+            if height > 0 {
+                changes.push(Change::CursorPosition {
+                    x: Position::Absolute(0),
+                    y: Position::Relative(-((height - 1) as isize)),
+                });
+            }
         }
 
         // Render to terminal
@@ -367,6 +379,12 @@ impl<T: Terminal> InlineTerminal<T> {
         self.rendered_lines = height;
 
         Ok(())
+    }
+
+    /// Render without cursor (convenience method)
+    #[allow(dead_code)]
+    pub fn render(&mut self) -> Result<()> {
+        self.render_with_cursor(None)
     }
 
     /// Clean up - clear our rendering region and show cursor
