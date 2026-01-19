@@ -8,6 +8,7 @@ use std::sync::{
 use anyhow::Result;
 use windows::{
     Foundation::TypedEventHandler,
+    Globalization::Language,
     Media::SpeechRecognition::{
         SpeechContinuousRecognitionCompletedEventArgs,
         SpeechContinuousRecognitionResultGeneratedEventArgs,
@@ -37,8 +38,10 @@ impl SpeechRecognizerImpl {
     }
 
     pub fn start(&mut self) -> Result<()> {
-        // Create speech recognizer with default language
-        let recognizer = WinSpeechRecognizer::Create()
+        // Create speech recognizer with system default language
+        let language = Language::CreateLanguage(&windows::core::HSTRING::from("en-US"))
+            .map_err(|e| anyhow::anyhow!("Failed to create language: {}", e))?;
+        let recognizer = WinSpeechRecognizer::Create(&language)
             .map_err(|e| anyhow::anyhow!("Failed to create speech recognizer: {}", e))?;
 
         // Compile the default dictation grammar
