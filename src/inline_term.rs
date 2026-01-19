@@ -305,6 +305,14 @@ impl<T: Terminal> InlineTerminal<T> {
         }
     }
 
+    /// Resize the height of the inline terminal
+    pub fn resize_height(&mut self, new_height: usize) -> Result<()> {
+        let (width, _) = self.surface.dimensions();
+        self.surface.resize(width, new_height);
+        self.surface.invalidate();
+        Ok(())
+    }
+
     /// Render the surface to the terminal using line-by-line approach.
     /// This uses relative cursor positioning to work inline.
     pub fn render(&mut self) -> Result<()> {

@@ -19,24 +19,20 @@ use termwiz::input::{InputEvent, KeyCode, Modifiers};
 use termwiz::terminal::{SystemTerminal, Terminal};
 
 mod inline_term;
-mod render;
 mod speech;
+mod widgets;
 
 use inline_term::InlineTerminal;
-use render::UiState;
 use speech::SpeechRecognizer;
+use widgets::{ClaudioUi, SpinnerState};
 
 struct App {
     transcription: Arc<Mutex<String>>,
-    previous_transcription_len: usize,
-    animation_start_index: usize,
     is_listening: Arc<AtomicBool>,
     is_ready: Arc<AtomicBool>,
     should_quit: bool,
     exit_code: i32,
-    animation_frame: usize,
-    last_frame_time: Instant,
-    transcription_start_time: Instant,
+    start_time: Instant,
     recognizer: Option<SpeechRecognizer>,
 }
 
@@ -44,15 +40,11 @@ impl App {
     fn new() -> Self {
         Self {
             transcription: Arc::new(Mutex::new(String::new())),
-            previous_transcription_len: 0,
-            animation_start_index: 0,
             is_listening: Arc::new(AtomicBool::new(false)),
             is_ready: Arc::new(AtomicBool::new(false)),
             should_quit: false,
             exit_code: 0,
-            animation_frame: 0,
-            last_frame_time: Instant::now(),
-            transcription_start_time: Instant::now(),
+            start_time: Instant::now(),
             recognizer: None,
         }
     }
@@ -77,9 +69,7 @@ impl App {
     fn restart(&mut self) -> Result<()> {
         self.stop_listening();
         self.transcription.lock().unwrap().clear();
-        self.previous_transcription_len = 0;
-        self.animation_start_index = 0;
-        self.transcription_start_time = Instant::now();
+        self.start_time = Instant::now();
         self.is_ready.store(false, Ordering::SeqCst);
 
         let transcription = Arc::clone(&self.transcription);
@@ -93,22 +83,6 @@ impl App {
 
     fn get_transcription(&self) -> String {
         self.transcription.lock().unwrap().clone()
-    }
-
-    fn update(&mut self) {
-        // Update animation frame
-        if self.last_frame_time.elapsed() >= Duration::from_millis(150) {
-            self.animation_frame = self.animation_frame.wrapping_add(1);
-            self.last_frame_time = Instant::now();
-        }
-
-        // Track new text for animation
-        let current_len = self.transcription.lock().unwrap().chars().count();
-        if current_len != self.previous_transcription_len {
-            self.transcription_start_time = Instant::now();
-            self.animation_start_index = self.previous_transcription_len;
-            self.previous_transcription_len = current_len;
-        }
     }
 }
 
@@ -130,70 +104,97 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let exit_code = run_app(&mut app)?;
+    let final_text = run_app(&mut app)?;
 
-    if exit_code == 0 {
-        let transcription = app.get_transcription();
-        if !transcription.is_empty() {
-            if let Some(cmd_args) = exec_command {
-                let mut child = Command::new(&cmd_args[0])
-                    .args(&cmd_args[1..])
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()?;
-                if let Some(mut stdin) = child.stdin.take() {
-                    stdin.write_all(transcription.as_bytes())?;
-                }
-                let status = child.wait()?;
-                std::process::exit(status.code().unwrap_or(1));
-            } else {
-                println!("{}", transcription);
+    if app.exit_code == 0 && !final_text.is_empty() {
+        if let Some(cmd_args) = exec_command {
+            let mut child = Command::new(&cmd_args[0])
+                .args(&cmd_args[1..])
+                .stdin(std::process::Stdio::piped())
+                .spawn()?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(final_text.as_bytes())?;
             }
+            let status = child.wait()?;
+            std::process::exit(status.code().unwrap_or(1));
+        } else {
+            // Print final transcription to stdout
+            println!("{}", final_text);
         }
     }
 
-    std::process::exit(exit_code);
+    std::process::exit(app.exit_code);
 }
 
-const MAX_LINES: usize = 2;
+const MIN_LINES: usize = 1;
+const MAX_LINES: usize = 10;
 
-fn run_app(app: &mut App) -> Result<i32> {
+fn run_app(app: &mut App) -> Result<String> {
     let tick_rate = Duration::from_millis(33);
+    let mut last_tick = Instant::now();
 
     // termwiz uses /dev/tty on Unix, CONIN$/CONOUT$ on Windows - works with piped stdout
     let caps = Capabilities::new_from_env().map_err(|e| anyhow::anyhow!("{}", e))?;
     let terminal = SystemTerminal::new(caps).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // Create inline terminal with our fixed height
-    let mut term = InlineTerminal::new(terminal, MAX_LINES)?;
+    // Create inline terminal - starts with minimum height
+    let mut term = InlineTerminal::new(terminal, MIN_LINES)?;
 
     // Raw mode for immediate keys, no alternate screen for inline rendering
     term.terminal().set_raw_mode().map_err(|e| anyhow::anyhow!("{}", e))?;
 
+    // Initialize UI
+    let mut ui = ClaudioUi::new();
+
     loop {
-        app.update();
+        let elapsed_ms = app.start_time.elapsed().as_millis() as f32;
 
-        // Check for terminal resize
-        term.check_for_resize()?;
+        // Update spinner frame
+        if last_tick.elapsed() >= Duration::from_millis(100) {
+            ui.spinner.tick();
+            last_tick = Instant::now();
+        }
 
-        // Build UI state (need owned transcription for lifetime)
-        let transcription = app.get_transcription();
-        let ui = UiState {
-            transcription: &transcription,
-            elapsed_ms: app.transcription_start_time.elapsed().as_millis() as f32,
-            animation_start_index: app.animation_start_index,
-            animation_frame: app.animation_frame,
-            is_ready: app.is_ready.load(Ordering::SeqCst),
-            is_listening: app.is_listening.load(Ordering::SeqCst),
+        // Update UI state from app
+        let is_ready = app.is_ready.load(Ordering::SeqCst);
+        let is_listening = app.is_listening.load(Ordering::SeqCst);
+
+        ui.spinner.state = if !is_ready {
+            SpinnerState::Loading
+        } else if is_listening {
+            SpinnerState::Listening
+        } else {
+            SpinnerState::Idle
         };
 
-        // Render to surface then flush to terminal
-        render::render_to_surface(term.surface(), &ui);
+        ui.placeholder.visible = is_ready && is_listening && ui.transcription.text.is_empty();
+        ui.controls.visible = is_ready;
+
+        // Update transcription
+        let transcription = app.get_transcription();
+        ui.transcription.set_text(transcription, elapsed_ms);
+
+        // Check if we need to resize the surface for wrapping
+        let (width, current_height) = term.surface().dimensions();
+        let needed_lines = ui.lines_needed(width).min(MAX_LINES);
+        if needed_lines != current_height {
+            term.resize_height(needed_lines)?;
+        }
+
+        // Check for terminal width resize
+        term.check_for_resize()?;
+
+        // Render UI to surface
+        ui.render(term.surface(), elapsed_ms);
         term.render()?;
 
         if app.should_quit {
+            // Clean up the UI
             term.cleanup()?;
             term.terminal().set_cooked_mode().map_err(|e| anyhow::anyhow!("{}", e))?;
-            return Ok(app.exit_code);
+
+            // Return the final transcription for output
+            return Ok(ui.final_text().to_string());
         }
 
         // Poll input
