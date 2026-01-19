@@ -4,6 +4,7 @@
 
 use std::{
     env,
+    fs,
     io::{stderr, Write},
     process::Command,
     sync::{
@@ -15,8 +16,10 @@ use std::{
 
 use anyhow::Result;
 use crossterm::{
+    cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
-    terminal,
+    execute,
+    terminal::{self, Clear, ClearType},
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout},
@@ -35,7 +38,10 @@ const CHAR_DELAY_MS: f32 = 20.0; // Delay between each character appearing
 const SHIMMER_SPEED: f32 = 1.0;  // Speed of the shimmer wave (slower = more subtle)
 
 struct App {
-    transcription: Arc<Mutex<String>>,
+    /// Text that has been edited/finalized (not being transcribed)
+    frozen_text: String,
+    /// Current recognition session output (shared with speech callback)
+    live_transcription: Arc<Mutex<String>>,
     previous_transcription_len: usize,
     animation_start_index: usize,
     is_listening: Arc<AtomicBool>,
@@ -53,7 +59,8 @@ struct App {
 impl App {
     fn new() -> Self {
         Self {
-            transcription: Arc::new(Mutex::new(String::new())),
+            frozen_text: String::new(),
+            live_transcription: Arc::new(Mutex::new(String::new())),
             previous_transcription_len: 0,
             animation_start_index: 0,
             is_listening: Arc::new(AtomicBool::new(false)),
@@ -70,7 +77,7 @@ impl App {
     }
 
     fn start_listening(&mut self) -> Result<()> {
-        let transcription = Arc::clone(&self.transcription);
+        let transcription = Arc::clone(&self.live_transcription);
         let is_listening = Arc::clone(&self.is_listening);
         let is_ready = Arc::clone(&self.is_ready);
 
@@ -91,8 +98,9 @@ impl App {
         // Stop current recognition session
         self.stop_listening();
 
-        // Clear transcription buffer
-        self.transcription.lock().unwrap().clear();
+        // Clear both transcription buffers
+        self.frozen_text.clear();
+        self.live_transcription.lock().unwrap().clear();
 
         // Reset animation state
         self.previous_transcription_len = 0;
@@ -101,7 +109,7 @@ impl App {
         self.is_ready.store(false, Ordering::SeqCst);
 
         // Start fresh recognition session
-        let transcription = Arc::clone(&self.transcription);
+        let transcription = Arc::clone(&self.live_transcription);
         let is_listening = Arc::clone(&self.is_listening);
         let is_ready = Arc::clone(&self.is_ready);
 
@@ -111,14 +119,21 @@ impl App {
         Ok(())
     }
 
+    /// Returns the complete transcription (frozen + live)
+    fn full_transcription(&self) -> String {
+        let live = self.live_transcription.lock().unwrap();
+        format!("{}{}", self.frozen_text, &*live)
+    }
+
     fn get_final_transcription(&self) -> String {
-        self.transcription.lock().unwrap().clone()
+        self.full_transcription()
     }
 
     fn update_transcription_state(&mut self) {
-        let transcription = self.transcription.lock().unwrap();
-        let current_len = transcription.chars().count();
-        drop(transcription);
+        // Animation state is relative to live_transcription only
+        let live = self.live_transcription.lock().unwrap();
+        let current_len = live.chars().count();
+        drop(live);
 
         if current_len != self.previous_transcription_len {
             self.transcription_start_time = Instant::now();
@@ -138,6 +153,74 @@ impl App {
         if self.shimmer_offset > 1000.0 {
             self.shimmer_offset = 0.0;
         }
+    }
+
+    /// Opens the current transcription in $EDITOR for manual editing.
+    /// After editing, the edited text becomes frozen and a new recognition session starts.
+    fn enter_edit_mode(&mut self) -> Result<()> {
+        // 1. Stop current recognition
+        self.stop_listening();
+
+        // 2. Combine frozen + live for editing
+        let current_text = self.full_transcription();
+
+        // 3. Write to temp file
+        let temp_path = env::temp_dir().join("claudio_edit.txt");
+        fs::write(&temp_path, &current_text)?;
+
+        // 4. Suspend TUI - disable raw mode and clear the inline viewport area
+        terminal::disable_raw_mode()?;
+        // Move cursor up to clear our viewport, then clear down
+        execute!(
+            stderr(),
+            cursor::MoveUp(self.viewport_height),
+            Clear(ClearType::FromCursorDown)
+        )?;
+
+        // 5. Find editor: $VISUAL -> $EDITOR -> vi
+        let editor = env::var("VISUAL")
+            .or_else(|_| env::var("EDITOR"))
+            .unwrap_or_else(|_| "vi".to_string());
+
+        // 6. Spawn editor and wait
+        let status = Command::new(&editor).arg(&temp_path).status();
+
+        // 7. Restore TUI
+        terminal::enable_raw_mode()?;
+
+        // 8. Handle editor result
+        match status {
+            Ok(exit_status) if exit_status.success() => {
+                // Apply edits - read the edited content
+                let edited = fs::read_to_string(&temp_path).unwrap_or(current_text);
+                self.frozen_text = edited;
+                self.live_transcription.lock().unwrap().clear();
+            }
+            _ => {
+                // Editor cancelled or failed - restore original text to frozen
+                self.frozen_text = current_text;
+                self.live_transcription.lock().unwrap().clear();
+            }
+        }
+
+        // 9. Reset animation state for the new live buffer
+        self.previous_transcription_len = 0;
+        self.animation_start_index = 0;
+        self.transcription_start_time = Instant::now();
+        self.is_ready.store(false, Ordering::SeqCst);
+
+        // 10. Clean up temp file (ignore errors)
+        let _ = fs::remove_file(&temp_path);
+
+        // 11. Restart recognition
+        let transcription = Arc::clone(&self.live_transcription);
+        let is_listening = Arc::clone(&self.is_listening);
+        let is_ready = Arc::clone(&self.is_ready);
+
+        self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
+        self.recognizer.as_mut().unwrap().start()?;
+
+        Ok(())
     }
 }
 
@@ -218,12 +301,12 @@ fn run_app(app: &mut App) -> Result<()> {
         app.update_animation();
         app.update_transcription_state();
 
-        // Calculate needed height based on transcription length
-        let transcription = app.transcription.lock().unwrap().clone();
+        // Calculate needed height based on full transcription length (frozen + live)
+        let full_transcription = app.full_transcription();
         let terminal_width = terminal::size()?.0 as usize;
 
         // Estimate lines needed: transcription + 1 line for status
-        let content_length = transcription.len();
+        let content_length = full_transcription.len();
         let transcription_lines = ((content_length as f32 / terminal_width as f32).ceil() as u16).max(1);
         let needed_height = (transcription_lines + 1).min(10);
 
@@ -250,17 +333,24 @@ fn run_app(app: &mut App) -> Result<()> {
         // Draw inline
         if let Some(ref mut term) = terminal {
             term.draw(|f| {
-                let transcription = app.transcription.lock().unwrap().clone();
+                let frozen_text = app.frozen_text.clone();
+                let live_transcription = app.live_transcription.lock().unwrap().clone();
                 let elapsed_since_update = app.transcription_start_time.elapsed().as_millis() as f32;
                 let is_ready = app.is_ready.load(Ordering::SeqCst);
                 let is_listening = app.is_listening.load(Ordering::SeqCst);
-                let transcription_spans = build_transcription_spans(
-                    &transcription,
+
+                // Build spans for frozen text (always white/settled)
+                let frozen_spans = build_frozen_spans(&frozen_text);
+
+                // Build spans for live transcription (with animation)
+                let live_spans = build_transcription_spans(
+                    &live_transcription,
                     elapsed_since_update,
                     app.shimmer_offset,
                     app.animation_start_index,
                     is_ready,
                     is_listening,
+                    !frozen_text.is_empty(), // has_frozen_text - suppress placeholder if we have frozen text
                 );
 
                 // Split area into transcription and status line
@@ -299,7 +389,8 @@ fn run_app(app: &mut App) -> Result<()> {
                     Span::styled(spinner, spinner_style),
                     Span::raw(" "),
                 ];
-                line_spans.extend(transcription_spans);
+                line_spans.extend(frozen_spans);
+                line_spans.extend(live_spans);
 
                 let transcription_para = Paragraph::new(Line::from(line_spans))
                     .wrap(Wrap { trim: false });
@@ -313,6 +404,11 @@ fn run_app(app: &mut App) -> Result<()> {
                             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(" finish • ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            "Ctrl+E",
+                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" edit • ", Style::default().fg(Color::DarkGray)),
                         Span::styled(
                             "Ctrl+R",
                             Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
@@ -379,6 +475,18 @@ fn run_app(app: &mut App) -> Result<()> {
                             app.exit_code = 1;
                         }
                     }
+                    KeyEvent {
+                        code: KeyCode::Char('e'),
+                        modifiers: KeyModifiers::CONTROL,
+                        ..
+                    } => {
+                        // Edit transcription in $EDITOR
+                        if let Err(e) = app.enter_edit_mode() {
+                            eprintln!("Failed to open editor: {}", e);
+                            app.should_quit = true;
+                            app.exit_code = 1;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -386,6 +494,18 @@ fn run_app(app: &mut App) -> Result<()> {
     }
 }
 
+/// Build spans for frozen (edited) text - always rendered as settled white
+fn build_frozen_spans(frozen_text: &str) -> Vec<Span<'_>> {
+    if frozen_text.is_empty() {
+        return vec![];
+    }
+    vec![Span::styled(
+        frozen_text,
+        Style::default().fg(Color::Rgb(255, 255, 255)),
+    )]
+}
+
+/// Build spans for live transcription with animation
 fn build_transcription_spans<'a>(
     transcription: &'a str,
     elapsed_since_update: f32,
@@ -393,12 +513,14 @@ fn build_transcription_spans<'a>(
     animation_start_index: usize,
     is_ready: bool,
     is_listening: bool,
+    has_frozen_text: bool,
 ) -> Vec<Span<'a>> {
     if transcription.is_empty() {
         if !is_ready {
             // Just show nothing during warmup, spinner is enough
             return vec![];
-        } else if is_listening {
+        } else if is_listening && !has_frozen_text {
+            // Only show placeholder if there's no frozen text
             return vec![Span::styled(
                 "Speak now...",
                 Style::default()

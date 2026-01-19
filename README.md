@@ -56,6 +56,7 @@ The TUI runs on stderr, so you see the interface while the transcription flows c
 ## Controls
 
 - **Enter** - Finish recording and submit transcription
+- **Ctrl+E** - Edit transcription in `$EDITOR` (then continue recording)
 - **Ctrl+R** - Clear and restart (keeps recording)
 - **Ctrl+C** - Cancel and exit
 
