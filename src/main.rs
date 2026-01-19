@@ -305,10 +305,12 @@ fn run_app(app: &mut App) -> Result<()> {
         let full_transcription = app.full_transcription();
         let terminal_width = terminal::size()?.0 as usize;
 
-        // Estimate lines needed: transcription + 1 line for status
-        let content_length = full_transcription.len();
-        let transcription_lines = ((content_length as f32 / terminal_width as f32).ceil() as u16).max(1);
-        let needed_height = (transcription_lines + 1).min(10);
+        // Calculate lines needed, accounting for both wrapping and explicit newlines
+        let transcription_lines: u16 = full_transcription
+            .split('\n')
+            .map(|line| ((line.len() as f32 / terminal_width as f32).ceil() as u16).max(1))
+            .sum();
+        let needed_height = (transcription_lines + 1).min(10); // +1 for status line
 
         // Recreate terminal if height changed
         if needed_height != last_height {
