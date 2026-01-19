@@ -63,6 +63,7 @@ pub struct Ui {
     // Transcription with animation
     text: String,
     animation_start_ms: f32,
+    frozen_len: usize, // Characters that are "frozen" (no animation, always white)
 
     // Editing state
     pub mode: Mode,
@@ -80,6 +81,7 @@ impl Ui {
             spinner_frame: 0,
             text: String::new(),
             animation_start_ms: 0.0,
+            frozen_len: 0,
             mode: Mode::Listening,
             cursor_pos: 0,
             show_placeholder: false,
@@ -99,9 +101,15 @@ impl Ui {
             return;
         }
 
-        // Start animation timer when first text arrives
-        if !text.is_empty() && self.text.is_empty() {
-            self.animation_start_ms = elapsed_ms;
+        // Start animation timer when new (non-frozen) text arrives
+        let new_char_count = text.chars().count();
+        let old_char_count = self.text.chars().count();
+        if new_char_count > old_char_count && new_char_count > self.frozen_len {
+            // New characters appeared beyond frozen portion - reset animation for them
+            if old_char_count <= self.frozen_len {
+                // First new character after frozen text
+                self.animation_start_ms = elapsed_ms;
+            }
         }
         self.text = text;
     }
@@ -116,7 +124,17 @@ impl Ui {
     pub fn clear(&mut self) {
         self.text.clear();
         self.animation_start_ms = 0.0;
+        self.frozen_len = 0;
         self.cursor_pos = 0;
+    }
+
+    /// Full reset (for restart)
+    pub fn reset(&mut self) {
+        self.text.clear();
+        self.animation_start_ms = 0.0;
+        self.frozen_len = 0;
+        self.cursor_pos = 0;
+        self.mode = Mode::Listening;
     }
 
     // --- Editing mode ---
@@ -128,7 +146,14 @@ impl Ui {
     }
 
     /// Exit editing mode, keeping changes
+    #[allow(dead_code)]
     pub fn finish_editing(&mut self) {
+        self.mode = Mode::Listening;
+    }
+
+    /// Exit editing mode and freeze the current text (no animation)
+    pub fn finish_editing_with_freeze(&mut self, frozen_len: usize) {
+        self.frozen_len = frozen_len;
         self.mode = Mode::Listening;
     }
 
@@ -422,7 +447,14 @@ impl Ui {
     // --- Character animation ---
 
     fn char_color(&self, index: usize, relative_time: f32) -> Option<ColorAttribute> {
-        let appear_time = index as f32 * CHAR_FADE_DELAY_MS;
+        // Frozen characters are always white (no animation)
+        if index < self.frozen_len {
+            return Some(self.white_color());
+        }
+
+        // For non-frozen characters, calculate animation based on their position after frozen text
+        let anim_index = index - self.frozen_len;
+        let appear_time = anim_index as f32 * CHAR_FADE_DELAY_MS;
 
         if relative_time < appear_time {
             return None; // Not visible yet
