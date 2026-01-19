@@ -1,4 +1,4 @@
-//! Claudio - Voice-to-text CLI using macOS Speech framework
+//! Claudio - Voice-to-text CLI using native speech recognition
 //!
 //! A CLI tool that listens via microphone and transcribes speech in real-time.
 
@@ -14,25 +14,15 @@ use std::{
 };
 
 use anyhow::Result;
-use ratatui::{
-    backend::TermwizBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Paragraph, Wrap},
-    Terminal,
-};
 use termwiz::caps::Capabilities;
-use termwiz::input::{InputEvent, KeyCode, KeyEvent, Modifiers};
-use termwiz::terminal::{buffered::BufferedTerminal, SystemTerminal, Terminal as TermwizTerminal};
+use termwiz::input::{InputEvent, KeyCode, Modifiers};
+use termwiz::terminal::{SystemTerminal, Terminal as _};
 
+mod render;
 mod speech;
-use speech::SpeechRecognizer;
 
-const LISTENING_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
-const WAITING_FRAMES: [&str; 12] = ["⠋", "⠙", "⠹", "⠸", "⢰", "⣰", "⣠", "⣄", "⣆", "⡆", "⠇", "⠏"];
-const CHAR_DELAY_MS: f32 = 20.0; // Delay between each character appearing
-const SHIMMER_SPEED: f32 = 1.0; // Speed of the shimmer wave (slower = more subtle)
+use render::{RenderState, UiState};
+use speech::SpeechRecognizer;
 
 struct App {
     transcription: Arc<Mutex<String>>,
@@ -46,7 +36,6 @@ struct App {
     last_frame_time: Instant,
     transcription_start_time: Instant,
     recognizer: Option<SpeechRecognizer>,
-    shimmer_offset: f32,
 }
 
 impl App {
@@ -63,7 +52,6 @@ impl App {
             last_frame_time: Instant::now(),
             transcription_start_time: Instant::now(),
             recognizer: None,
-            shimmer_offset: 0.0,
         }
     }
 
@@ -72,13 +60,8 @@ impl App {
         let is_listening = Arc::clone(&self.is_listening);
         let is_ready = Arc::clone(&self.is_ready);
 
-        self.recognizer = Some(SpeechRecognizer::new(
-            transcription,
-            is_listening,
-            is_ready,
-        )?);
+        self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
         self.recognizer.as_mut().unwrap().start()?;
-
         Ok(())
     }
 
@@ -90,400 +73,149 @@ impl App {
     }
 
     fn restart(&mut self) -> Result<()> {
-        // Stop current recognition session
         self.stop_listening();
-
-        // Clear transcription buffer
         self.transcription.lock().unwrap().clear();
-
-        // Reset animation state
         self.previous_transcription_len = 0;
         self.animation_start_index = 0;
         self.transcription_start_time = Instant::now();
         self.is_ready.store(false, Ordering::SeqCst);
 
-        // Start fresh recognition session
         let transcription = Arc::clone(&self.transcription);
         let is_listening = Arc::clone(&self.is_listening);
         let is_ready = Arc::clone(&self.is_ready);
 
-        self.recognizer = Some(SpeechRecognizer::new(
-            transcription,
-            is_listening,
-            is_ready,
-        )?);
+        self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
         self.recognizer.as_mut().unwrap().start()?;
-
         Ok(())
     }
 
-    fn get_final_transcription(&self) -> String {
+    fn get_transcription(&self) -> String {
         self.transcription.lock().unwrap().clone()
     }
 
-    fn update_transcription_state(&mut self) {
-        let transcription = self.transcription.lock().unwrap();
-        let current_len = transcription.chars().count();
-        drop(transcription);
+    fn update(&mut self) {
+        // Update animation frame
+        if self.last_frame_time.elapsed() >= Duration::from_millis(150) {
+            self.animation_frame = self.animation_frame.wrapping_add(1);
+            self.last_frame_time = Instant::now();
+        }
 
+        // Track new text for animation
+        let current_len = self.transcription.lock().unwrap().chars().count();
         if current_len != self.previous_transcription_len {
             self.transcription_start_time = Instant::now();
             self.animation_start_index = self.previous_transcription_len;
             self.previous_transcription_len = current_len;
         }
     }
-
-    fn update_animation(&mut self) {
-        if self.last_frame_time.elapsed() >= Duration::from_millis(150) {
-            self.animation_frame = (self.animation_frame + 1) % LISTENING_FRAMES.len();
-            self.last_frame_time = Instant::now();
-        }
-
-        // Update shimmer wave
-        self.shimmer_offset += SHIMMER_SPEED;
-        if self.shimmer_offset > 1000.0 {
-            self.shimmer_offset = 0.0;
-        }
-    }
 }
 
 fn main() -> Result<()> {
-    // Parse args: check if we have `--` followed by a command
     let args: Vec<String> = env::args().collect();
-    let exec_command = if let Some(separator_pos) = args.iter().position(|arg| arg == "--") {
-        if separator_pos + 1 < args.len() {
-            Some(args[separator_pos + 1..].to_vec())
+    let exec_command = args.iter().position(|a| a == "--").and_then(|pos| {
+        if pos + 1 < args.len() {
+            Some(args[pos + 1..].to_vec())
         } else {
             None
         }
-    } else {
-        None
-    };
+    });
 
     let mut app = App::new();
 
-    // Start speech recognition
     if let Err(e) = app.start_listening() {
         eprintln!("Failed to start speech recognition: {}", e);
         eprintln!("Make sure you have granted microphone and speech recognition permissions.");
         std::process::exit(1);
     }
 
-    let result = run_app(&mut app);
+    let exit_code = run_app(&mut app)?;
 
-    match result {
-        Ok(()) => {
-            if app.exit_code == 0 {
-                let transcription = app.get_final_transcription();
-                if !transcription.is_empty() {
-                    if let Some(cmd_args) = exec_command {
-                        // Execute the command with transcription as stdin
-                        let mut child = Command::new(&cmd_args[0])
-                            .args(&cmd_args[1..])
-                            .stdin(std::process::Stdio::piped())
-                            .spawn()?;
-
-                        if let Some(mut stdin) = child.stdin.take() {
-                            stdin.write_all(transcription.as_bytes())?;
-                        }
-
-                        let status = child.wait()?;
-                        std::process::exit(status.code().unwrap_or(1));
-                    } else {
-                        // Just print to stdout
-                        println!("{}", transcription);
-                    }
+    if exit_code == 0 {
+        let transcription = app.get_transcription();
+        if !transcription.is_empty() {
+            if let Some(cmd_args) = exec_command {
+                let mut child = Command::new(&cmd_args[0])
+                    .args(&cmd_args[1..])
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()?;
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(transcription.as_bytes())?;
                 }
+                let status = child.wait()?;
+                std::process::exit(status.code().unwrap_or(1));
+            } else {
+                println!("{}", transcription);
             }
-            std::process::exit(app.exit_code);
-        }
-        Err(e) => {
-            eprintln!("{}", e);
-            std::process::exit(1);
         }
     }
+
+    std::process::exit(exit_code);
 }
 
-fn run_app(app: &mut App) -> Result<()> {
-    let tick_rate = Duration::from_millis(33); // ~30 FPS
+fn run_app(app: &mut App) -> Result<i32> {
+    let tick_rate = Duration::from_millis(33);
 
-    // Create termwiz backend manually to avoid entering alternate screen
-    // This keeps the inline behavior where output stays in scrollback
-    // termwiz automatically uses /dev/tty on Unix and CONIN$/CONOUT$ on Windows
+    // termwiz uses /dev/tty on Unix, CONIN$/CONOUT$ on Windows - works with piped stdout
     let caps = Capabilities::new_from_env().map_err(|e| anyhow::anyhow!("{}", e))?;
-    let sys_terminal = SystemTerminal::new(caps).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let mut buffered_terminal = BufferedTerminal::new(sys_terminal).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let mut term = SystemTerminal::new(caps).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // Enable raw mode but DON'T enter alternate screen - keeps inline behavior
-    buffered_terminal
-        .terminal()
-        .set_raw_mode()
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    // Raw mode for immediate keys, no alternate screen for inline rendering
+    term.set_raw_mode().map_err(|e| anyhow::anyhow!("{}", e))?;
+    render::hide_cursor(&mut term)?;
 
-    let backend = TermwizBackend::with_buffered_terminal(buffered_terminal);
-    let mut terminal = Terminal::new(backend)?;
-    terminal.hide_cursor()?;
+    let mut render_state = RenderState::default();
 
     loop {
-        // Update state
-        app.update_animation();
-        app.update_transcription_state();
+        app.update();
 
-        // Draw the UI
-        terminal.draw(|f| {
-            let transcription = app.transcription.lock().unwrap().clone();
-            let elapsed_since_update =
-                app.transcription_start_time.elapsed().as_millis() as f32;
-            let is_ready = app.is_ready.load(Ordering::SeqCst);
-            let is_listening = app.is_listening.load(Ordering::SeqCst);
-            let transcription_spans = build_transcription_spans(
-                &transcription,
-                elapsed_since_update,
-                app.shimmer_offset,
-                app.animation_start_index,
-                is_ready,
-                is_listening,
-            );
+        // Build UI state (need owned transcription for lifetime)
+        let transcription = app.get_transcription();
+        let ui = UiState {
+            transcription: &transcription,
+            elapsed_ms: app.transcription_start_time.elapsed().as_millis() as f32,
+            animation_start_index: app.animation_start_index,
+            animation_frame: app.animation_frame,
+            is_ready: app.is_ready.load(Ordering::SeqCst),
+            is_listening: app.is_listening.load(Ordering::SeqCst),
+        };
 
-            // Split area into transcription and status line
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(1),    // Transcription
-                    Constraint::Length(1), // Status line
-                ])
-                .split(f.area());
-
-            // Render transcription with spinner at the start
-            let is_ready = app.is_ready.load(Ordering::SeqCst);
-            let is_listening = app.is_listening.load(Ordering::SeqCst);
-            let (spinner, spinner_style) = if !is_ready {
-                // Warming up
-                (
-                    WAITING_FRAMES[app.animation_frame],
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if is_listening {
-                // Ready and listening - subtle pulsing red dot
-                let pulse_progress = (app.animation_frame as f32
-                    / LISTENING_FRAMES.len() as f32)
-                    * std::f32::consts::PI;
-                let pulse = (pulse_progress.sin() + 1.0) / 2.0; // 0.0 to 1.0
-
-                // Subtle pulse - stays mostly bright red with gentle dimming
-                let min_brightness = 200;
-                let max_brightness = 255;
-                let brightness = (min_brightness as f32
-                    + pulse * (max_brightness - min_brightness) as f32)
-                    as u8;
-
-                (
-                    "●",
-                    Style::default()
-                        .fg(Color::Rgb(brightness, 0, 0))
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                // Not listening
-                ("○", Style::default().fg(Color::DarkGray))
-            };
-
-            let mut line_spans = vec![Span::styled(spinner, spinner_style), Span::raw(" ")];
-            line_spans.extend(transcription_spans);
-
-            let transcription_para =
-                Paragraph::new(Line::from(line_spans)).wrap(Wrap { trim: false });
-            f.render_widget(transcription_para, chunks[0]);
-
-            // Render status line - only show controls when ready
-            let status_spans = if is_ready {
-                vec![
-                    Span::styled(
-                        "Enter",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" finish • ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        "Ctrl+R",
-                        Style::default()
-                            .fg(Color::Blue)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" restart • ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        "Ctrl+C",
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
-                ]
-            } else {
-                vec![]
-            };
-
-            let status_para = Paragraph::new(Line::from(status_spans));
-            f.render_widget(status_para, chunks[1]);
-        })?;
+        render::render(&mut term, &mut render_state, &ui)?;
 
         if app.should_quit {
-            terminal.show_cursor()?;
-            // Disable raw mode before exiting
-            terminal
-                .backend_mut()
-                .buffered_terminal_mut()
-                .terminal()
-                .set_cooked_mode()
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
-            return Ok(());
+            render::cleanup(&mut term, render_state.rendered_lines)?;
+            term.set_cooked_mode().map_err(|e| anyhow::anyhow!("{}", e))?;
+            return Ok(app.exit_code);
         }
 
-        // Handle input with timeout using termwiz
-        // termwiz uses /dev/tty directly, so it works even when stdout is piped
-        if let Some(event) = terminal
-            .backend_mut()
-            .buffered_terminal_mut()
-            .terminal()
-            .poll_input(Some(tick_rate))
-            .map_err(|e| anyhow::anyhow!("{}", e))?
-        {
-            match event {
-                InputEvent::Key(KeyEvent {
-                    key: KeyCode::Enter,
-                    modifiers: Modifiers::NONE,
-                }) => {
-                    app.stop_listening();
-                    app.should_quit = true;
-                    app.exit_code = 0;
-                }
-                InputEvent::Key(KeyEvent {
-                    key: KeyCode::Char('c'),
-                    modifiers: Modifiers::CTRL,
-                }) => {
-                    app.stop_listening();
-                    app.should_quit = true;
-                    app.exit_code = 130; // Standard Ctrl+C exit code
-                }
-                InputEvent::Key(KeyEvent {
-                    key: KeyCode::Char('r'),
-                    modifiers: Modifiers::CTRL,
-                }) => {
-                    // Restart with fresh recognition session
-                    if let Err(e) = app.restart() {
-                        eprintln!("Failed to restart: {}", e);
-                        app.should_quit = true;
-                        app.exit_code = 1;
-                    }
-                }
-                _ => {}
-            }
+        // Poll input
+        if let Some(event) = term.poll_input(Some(tick_rate)).map_err(|e| anyhow::anyhow!("{}", e))? {
+            handle_input(app, event)?;
         }
     }
 }
 
-fn build_transcription_spans<'a>(
-    transcription: &'a str,
-    elapsed_since_update: f32,
-    _shimmer_offset: f32,
-    animation_start_index: usize,
-    is_ready: bool,
-    is_listening: bool,
-) -> Vec<Span<'a>> {
-    if transcription.is_empty() {
-        if !is_ready {
-            // Just show nothing during warmup, spinner is enough
-            return vec![];
-        } else if is_listening {
-            return vec![Span::styled(
-                "Speak now...",
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC),
-            )];
-        } else {
-            return vec![];
-        }
-    }
-
-    let chars: Vec<char> = transcription.chars().collect();
-    let mut spans = Vec::new();
-    let mut current_word = String::new();
-    let mut current_color = Color::White;
-
-    for (i, &ch) in chars.iter().enumerate() {
-        let color = if i < animation_start_index {
-            // Character is from previous update - already settled (bright white)
-            Color::Rgb(255, 255, 255)
-        } else {
-            // Character is part of the new update - apply animation
-            let relative_index = i - animation_start_index;
-            let char_appearance_time = relative_index as f32 * CHAR_DELAY_MS;
-
-            if elapsed_since_update < char_appearance_time {
-                // Character hasn't appeared yet
-                Color::Reset
-            } else {
-                // Character has appeared, fade from cyan to white over time
-                let char_age = elapsed_since_update - char_appearance_time;
-
-                // Fade from cyan to white over 1.5 seconds
-                if char_age < 1500.0 {
-                    // Progress from 0.0 to 1.0 over fade duration
-                    let fade_progress = (char_age / 1500.0).min(1.0);
-
-                    // Smooth ease-out curve for more natural fade
-                    let eased_progress = 1.0 - (1.0 - fade_progress).powi(3);
-
-                    // Start color: dim cyan (120, 160, 180)
-                    // End color: bright white (255, 255, 255)
-                    let start_r = 120.0;
-                    let start_g = 160.0;
-                    let start_b = 180.0;
-                    let end_r = 255.0;
-                    let end_g = 255.0;
-                    let end_b = 255.0;
-
-                    let r = (start_r + (end_r - start_r) * eased_progress) as u8;
-                    let g = (start_g + (end_g - start_g) * eased_progress) as u8;
-                    let b = (start_b + (end_b - start_b) * eased_progress) as u8;
-
-                    Color::Rgb(r, g, b)
-                } else {
-                    // After fade completes, settle to bright white
-                    Color::Rgb(255, 255, 255)
+fn handle_input(app: &mut App, event: InputEvent) -> Result<()> {
+    if let InputEvent::Key(key) = event {
+        match (key.key, key.modifiers) {
+            (KeyCode::Enter, Modifiers::NONE) => {
+                app.stop_listening();
+                app.should_quit = true;
+                app.exit_code = 0;
+            }
+            (KeyCode::Char('c'), Modifiers::CTRL) => {
+                app.stop_listening();
+                app.should_quit = true;
+                app.exit_code = 130;
+            }
+            (KeyCode::Char('r'), Modifiers::CTRL) => {
+                if let Err(e) = app.restart() {
+                    eprintln!("Failed to restart: {}", e);
+                    app.should_quit = true;
+                    app.exit_code = 1;
                 }
             }
-        };
-
-        // Skip characters that haven't appeared yet
-        if color == Color::Reset {
-            continue;
+            _ => {}
         }
-
-        // Group consecutive characters with same color into spans
-        if color != current_color {
-            if !current_word.is_empty() {
-                spans.push(Span::styled(
-                    current_word.clone(),
-                    Style::default().fg(current_color),
-                ));
-                current_word.clear();
-            }
-            current_color = color;
-        }
-
-        current_word.push(ch);
     }
-
-    // Add final span
-    if !current_word.is_empty() {
-        spans.push(Span::styled(
-            current_word,
-            Style::default().fg(current_color),
-        ));
-    }
-
-    spans
+    Ok(())
 }
