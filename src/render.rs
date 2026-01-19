@@ -7,7 +7,7 @@ use anyhow::Result;
 use termwiz::cell::AttributeChange;
 use termwiz::color::ColorAttribute;
 use termwiz::surface::{Change, CursorVisibility, Position};
-use termwiz::terminal::{buffered::BufferedTerminal, SystemTerminal};
+use termwiz::terminal::Terminal;
 
 const LISTENING_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 const WAITING_FRAMES: [&str; 12] = ["⠋", "⠙", "⠹", "⠸", "⢰", "⣰", "⣠", "⣄", "⣆", "⡆", "⠇", "⠏"];
@@ -48,28 +48,30 @@ pub struct UiState<'a> {
 }
 
 /// Hide cursor for rendering
-pub fn hide_cursor(term: &mut BufferedTerminal<SystemTerminal>) -> Result<()> {
-    term.add_change(Change::CursorVisibility(CursorVisibility::Hidden));
-    term.flush().map_err(|e| anyhow::anyhow!("{}", e))?;
+pub fn hide_cursor(term: &mut dyn Terminal) -> Result<()> {
+    term.render(&[Change::CursorVisibility(CursorVisibility::Hidden)])
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
     Ok(())
 }
 
 /// Show cursor (for cleanup)
-pub fn show_cursor(term: &mut BufferedTerminal<SystemTerminal>) -> Result<()> {
-    term.add_change(Change::CursorVisibility(CursorVisibility::Visible));
-    term.flush().map_err(|e| anyhow::anyhow!("{}", e))?;
+pub fn show_cursor(term: &mut dyn Terminal) -> Result<()> {
+    term.render(&[Change::CursorVisibility(CursorVisibility::Visible)])
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
     Ok(())
 }
 
 /// Render the UI inline at current cursor position
 pub fn render(
-    term: &mut BufferedTerminal<SystemTerminal>,
+    term: &mut dyn Terminal,
     state: &mut RenderState,
     ui: &UiState,
 ) -> Result<()> {
+    let mut changes = Vec::new();
+
     // Move cursor up to start of our rendering area
     if state.rendered_lines > 0 {
-        term.add_change(Change::CursorPosition {
+        changes.push(Change::CursorPosition {
             x: Position::Absolute(0),
             y: Position::Relative(-(state.rendered_lines as isize)),
         });
@@ -80,15 +82,15 @@ pub fn render(
     // Render each line
     let mut total_lines = 0;
     for line in &lines {
-        term.add_change(Change::ClearToEndOfLine(Default::default()));
+        changes.push(Change::ClearToEndOfLine(Default::default()));
 
         for seg in line {
-            term.add_change(Change::Attribute(AttributeChange::Foreground(seg.color)));
-            term.add_change(Change::Text(seg.text.clone()));
+            changes.push(Change::Attribute(AttributeChange::Foreground(seg.color)));
+            changes.push(Change::Text(seg.text.clone()));
         }
 
-        term.add_change(Change::Attribute(AttributeChange::Foreground(ColorAttribute::Default)));
-        term.add_change(Change::Text("\r\n".to_string()));
+        changes.push(Change::Attribute(AttributeChange::Foreground(ColorAttribute::Default)));
+        changes.push(Change::Text("\r\n".to_string()));
         total_lines += 1;
 
         if total_lines >= MAX_LINES {
@@ -98,8 +100,8 @@ pub fn render(
 
     // Clear any leftover lines from previous render
     while total_lines < state.rendered_lines {
-        term.add_change(Change::ClearToEndOfLine(Default::default()));
-        term.add_change(Change::Text("\r\n".to_string()));
+        changes.push(Change::ClearToEndOfLine(Default::default()));
+        changes.push(Change::Text("\r\n".to_string()));
         total_lines += 1;
     }
 
@@ -107,21 +109,23 @@ pub fn render(
 
     // Move cursor back to start for next frame
     if state.rendered_lines > 0 {
-        term.add_change(Change::CursorPosition {
+        changes.push(Change::CursorPosition {
             x: Position::Absolute(0),
             y: Position::Relative(-(state.rendered_lines as isize)),
         });
     }
 
-    term.flush().map_err(|e| anyhow::anyhow!("{}", e))?;
+    term.render(&changes).map_err(|e| anyhow::anyhow!("{}", e))?;
     Ok(())
 }
 
 /// Clear rendered lines on exit
-pub fn cleanup(term: &mut BufferedTerminal<SystemTerminal>, lines: usize) -> Result<()> {
+pub fn cleanup(term: &mut dyn Terminal, lines: usize) -> Result<()> {
+    let mut changes = Vec::new();
+
     for _ in 0..lines {
-        term.add_change(Change::ClearToEndOfLine(Default::default()));
-        term.add_change(Change::CursorPosition {
+        changes.push(Change::ClearToEndOfLine(Default::default()));
+        changes.push(Change::CursorPosition {
             x: Position::Absolute(0),
             y: Position::Relative(1),
         });
@@ -129,12 +133,13 @@ pub fn cleanup(term: &mut BufferedTerminal<SystemTerminal>, lines: usize) -> Res
 
     // Return to start
     if lines > 0 {
-        term.add_change(Change::CursorPosition {
+        changes.push(Change::CursorPosition {
             x: Position::Absolute(0),
             y: Position::Relative(-(lines as isize)),
         });
     }
 
+    term.render(&changes).map_err(|e| anyhow::anyhow!("{}", e))?;
     show_cursor(term)?;
     Ok(())
 }
