@@ -4,7 +4,7 @@
 
 use std::{
     env,
-    io::{stderr, IsTerminal, Read, Write},
+    io::Write,
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -14,17 +14,17 @@ use std::{
 };
 
 use anyhow::Result;
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
-    terminal,
-};
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    backend::TermwizBackend,
+    layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
-    TerminalOptions, Viewport,
+    Terminal,
 };
+use termwiz::caps::Capabilities;
+use termwiz::input::{InputEvent, KeyCode, KeyEvent, Modifiers};
+use termwiz::terminal::{buffered::BufferedTerminal, SystemTerminal, Terminal as TermwizTerminal};
 
 mod speech;
 use speech::SpeechRecognizer;
@@ -33,78 +33,6 @@ const LISTENING_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 const WAITING_FRAMES: [&str; 12] = ["⠋", "⠙", "⠹", "⠸", "⢰", "⣰", "⣠", "⣄", "⣆", "⡆", "⠇", "⠏"];
 const CHAR_DELAY_MS: f32 = 20.0; // Delay between each character appearing
 const SHIMMER_SPEED: f32 = 1.0; // Speed of the shimmer wave (slower = more subtle)
-
-/// Query cursor position via /dev/tty directly, bypassing stdout.
-/// This allows the TUI to work when stdout is piped (e.g., `claudio | less`).
-/// Uses /dev/tty which is the controlling terminal regardless of redirections.
-/// Returns (column, row) with 0-based indexing.
-#[cfg(unix)]
-fn cursor_position_via_tty() -> Result<(u16, u16)> {
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    // Open /dev/tty for both reading and writing
-    // This gives us direct access to the controlling terminal
-    let mut tty = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOCTTY) // Don't make it controlling terminal
-        .open("/dev/tty")?;
-
-    // Write cursor position query: ESC [ 6 n
-    tty.write_all(b"\x1B[6n")?;
-    tty.flush()?;
-
-    // Read response: ESC [ row ; col R
-    let mut buf = [0u8; 32];
-    let mut i = 0;
-
-    let start = Instant::now();
-    let timeout = Duration::from_secs(2);
-
-    loop {
-        if start.elapsed() > timeout {
-            anyhow::bail!("Timeout waiting for cursor position response");
-        }
-
-        if let Ok(1) = tty.read(&mut buf[i..i + 1]) {
-            if buf[i] == b'R' {
-                break;
-            }
-            i += 1;
-            if i >= buf.len() {
-                anyhow::bail!("Cursor position response too long");
-            }
-        }
-    }
-
-    // Parse response: ESC [ row ; col R
-    let response = std::str::from_utf8(&buf[..i])?;
-    let esc_pos = response.find('\x1B').unwrap_or(0);
-    let coords = &response[esc_pos..];
-
-    if !coords.starts_with("\x1B[") {
-        anyhow::bail!("Invalid cursor position response: {}", response);
-    }
-
-    let coords = &coords[2..]; // Skip ESC [
-    let parts: Vec<&str> = coords.split(';').collect();
-    if parts.len() != 2 {
-        anyhow::bail!("Invalid cursor position format: {}", coords);
-    }
-
-    let row: u16 = parts[0].parse()?;
-    let col: u16 = parts[1].parse()?;
-
-    // Terminal reports 1-based, convert to 0-based
-    Ok((col.saturating_sub(1), row.saturating_sub(1)))
-}
-
-/// Fallback for non-Unix systems - just return (0, 0) and hope for the best
-#[cfg(not(unix))]
-fn cursor_position_via_tty() -> Result<(u16, u16)> {
-    Ok((0, 0))
-}
 
 struct App {
     transcription: Arc<Mutex<String>>,
@@ -118,7 +46,6 @@ struct App {
     last_frame_time: Instant,
     transcription_start_time: Instant,
     recognizer: Option<SpeechRecognizer>,
-    viewport_height: u16,
     shimmer_offset: f32,
 }
 
@@ -136,7 +63,6 @@ impl App {
             last_frame_time: Instant::now(),
             transcription_start_time: Instant::now(),
             recognizer: None,
-            viewport_height: 1,
             shimmer_offset: 0.0,
         }
     }
@@ -281,234 +207,177 @@ fn main() -> Result<()> {
 fn run_app(app: &mut App) -> Result<()> {
     let tick_rate = Duration::from_millis(33); // ~30 FPS
 
-    // Check if stdout is piped - if so, we need to use stderr for cursor position queries
-    // because crossterm's Viewport::Inline queries cursor position via stdout
-    let stdout_is_tty = std::io::stdout().is_terminal();
+    // Create termwiz backend manually to avoid entering alternate screen
+    // This keeps the inline behavior where output stays in scrollback
+    // termwiz automatically uses /dev/tty on Unix and CONIN$/CONOUT$ on Windows
+    let caps = Capabilities::new_from_env().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let sys_terminal = SystemTerminal::new(caps).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let mut buffered_terminal = BufferedTerminal::new(sys_terminal).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // Get initial cursor position and terminal width
-    // We need raw mode enabled BEFORE querying cursor position so the response is readable
-    terminal::enable_raw_mode()?;
+    // Enable raw mode but DON'T enter alternate screen - keeps inline behavior
+    buffered_terminal
+        .terminal()
+        .set_raw_mode()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let (_initial_cursor_col, initial_cursor_row) = if stdout_is_tty {
-        // stdout is a TTY, crossterm's normal cursor query will work
-        // We don't need to query here, Viewport::Inline handles it
-        (0, 0) // These won't be used
-    } else {
-        // stdout is piped, query cursor position via /dev/tty
-        cursor_position_via_tty()?
-    };
-
-    let (terminal_width, terminal_height) = terminal::size()?;
-
-    // Create initial viewport
-    let initial_height = 2u16;
-    let viewport = if stdout_is_tty {
-        Viewport::Inline(initial_height)
-    } else {
-        // Use Fixed viewport with position from our stderr-based query
-        // Ensure we don't overflow past terminal bottom
-        let y = initial_cursor_row.min(terminal_height.saturating_sub(initial_height));
-        Viewport::Fixed(Rect::new(0, y, terminal_width, initial_height))
-    };
-
-    let backend = ratatui::backend::CrosstermBackend::new(stderr());
-    let terminal_instance = ratatui::Terminal::with_options(backend, TerminalOptions { viewport })?;
-    let mut terminal = Some(terminal_instance);
-    let mut last_height = initial_height;
-
-    // Track the fixed viewport row for non-TTY mode
-    let fixed_viewport_row = initial_cursor_row;
+    let backend = TermwizBackend::with_buffered_terminal(buffered_terminal);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.hide_cursor()?;
 
     loop {
         // Update state
         app.update_animation();
         app.update_transcription_state();
 
-        // Calculate needed height based on transcription length
-        let transcription = app.transcription.lock().unwrap().clone();
-        let terminal_width = terminal::size()?.0 as usize;
+        // Draw the UI
+        terminal.draw(|f| {
+            let transcription = app.transcription.lock().unwrap().clone();
+            let elapsed_since_update =
+                app.transcription_start_time.elapsed().as_millis() as f32;
+            let is_ready = app.is_ready.load(Ordering::SeqCst);
+            let is_listening = app.is_listening.load(Ordering::SeqCst);
+            let transcription_spans = build_transcription_spans(
+                &transcription,
+                elapsed_since_update,
+                app.shimmer_offset,
+                app.animation_start_index,
+                is_ready,
+                is_listening,
+            );
 
-        // Estimate lines needed: transcription + 1 line for status
-        let content_length = transcription.len();
-        let transcription_lines =
-            ((content_length as f32 / terminal_width as f32).ceil() as u16).max(1);
-        let needed_height = (transcription_lines + 1).min(10);
+            // Split area into transcription and status line
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(1),    // Transcription
+                    Constraint::Length(1), // Status line
+                ])
+                .split(f.area());
 
-        // Recreate terminal if height changed
-        if needed_height != last_height {
-            if terminal.is_some() {
-                terminal::disable_raw_mode()?;
-            }
+            // Render transcription with spinner at the start
+            let is_ready = app.is_ready.load(Ordering::SeqCst);
+            let is_listening = app.is_listening.load(Ordering::SeqCst);
+            let (spinner, spinner_style) = if !is_ready {
+                // Warming up
+                (
+                    WAITING_FRAMES[app.animation_frame],
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else if is_listening {
+                // Ready and listening - subtle pulsing red dot
+                let pulse_progress = (app.animation_frame as f32
+                    / LISTENING_FRAMES.len() as f32)
+                    * std::f32::consts::PI;
+                let pulse = (pulse_progress.sin() + 1.0) / 2.0; // 0.0 to 1.0
 
-            // Recreate terminal with stderr backend
-            let backend = ratatui::backend::CrosstermBackend::new(stderr());
-            terminal::enable_raw_mode()?;
+                // Subtle pulse - stays mostly bright red with gentle dimming
+                let min_brightness = 200;
+                let max_brightness = 255;
+                let brightness = (min_brightness as f32
+                    + pulse * (max_brightness - min_brightness) as f32)
+                    as u8;
 
-            let viewport = if stdout_is_tty {
-                Viewport::Inline(needed_height)
+                (
+                    "●",
+                    Style::default()
+                        .fg(Color::Rgb(brightness, 0, 0))
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
-                // Recalculate Fixed viewport with new height
-                let (term_width, term_height) = terminal::size()?;
-                let y = fixed_viewport_row.min(term_height.saturating_sub(needed_height));
-                Viewport::Fixed(Rect::new(0, y, term_width, needed_height))
+                // Not listening
+                ("○", Style::default().fg(Color::DarkGray))
             };
 
-            let terminal_instance =
-                ratatui::Terminal::with_options(backend, TerminalOptions { viewport })?;
-            terminal = Some(terminal_instance);
-            last_height = needed_height;
-            app.viewport_height = needed_height;
-        }
+            let mut line_spans = vec![Span::styled(spinner, spinner_style), Span::raw(" ")];
+            line_spans.extend(transcription_spans);
 
-        // Draw inline
-        if let Some(ref mut term) = terminal {
-            term.draw(|f| {
-                let transcription = app.transcription.lock().unwrap().clone();
-                let elapsed_since_update =
-                    app.transcription_start_time.elapsed().as_millis() as f32;
-                let is_ready = app.is_ready.load(Ordering::SeqCst);
-                let is_listening = app.is_listening.load(Ordering::SeqCst);
-                let transcription_spans = build_transcription_spans(
-                    &transcription,
-                    elapsed_since_update,
-                    app.shimmer_offset,
-                    app.animation_start_index,
-                    is_ready,
-                    is_listening,
-                );
+            let transcription_para =
+                Paragraph::new(Line::from(line_spans)).wrap(Wrap { trim: false });
+            f.render_widget(transcription_para, chunks[0]);
 
-                // Split area into transcription and status line
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(1),    // Transcription
-                        Constraint::Length(1), // Status line
-                    ])
-                    .split(f.area());
-
-                // Render transcription with spinner at the start
-                let is_ready = app.is_ready.load(Ordering::SeqCst);
-                let is_listening = app.is_listening.load(Ordering::SeqCst);
-                let (spinner, spinner_style) = if !is_ready {
-                    // Warming up
-                    (
-                        WAITING_FRAMES[app.animation_frame],
+            // Render status line - only show controls when ready
+            let status_spans = if is_ready {
+                vec![
+                    Span::styled(
+                        "Enter",
                         Style::default()
-                            .fg(Color::DarkGray)
+                            .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
-                    )
-                } else if is_listening {
-                    // Ready and listening - subtle pulsing red dot
-                    let pulse_progress = (app.animation_frame as f32
-                        / LISTENING_FRAMES.len() as f32)
-                        * std::f32::consts::PI;
-                    let pulse = (pulse_progress.sin() + 1.0) / 2.0; // 0.0 to 1.0
-
-                    // Subtle pulse - stays mostly bright red with gentle dimming
-                    let min_brightness = 200;
-                    let max_brightness = 255;
-                    let brightness = (min_brightness as f32
-                        + pulse * (max_brightness - min_brightness) as f32)
-                        as u8;
-
-                    (
-                        "●",
+                    ),
+                    Span::styled(" finish • ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        "Ctrl+R",
                         Style::default()
-                            .fg(Color::Rgb(brightness, 0, 0))
+                            .fg(Color::Blue)
                             .add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    // Not listening
-                    ("○", Style::default().fg(Color::DarkGray))
-                };
+                    ),
+                    Span::styled(" restart • ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        "Ctrl+C",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+                ]
+            } else {
+                vec![]
+            };
 
-                let mut line_spans = vec![Span::styled(spinner, spinner_style), Span::raw(" ")];
-                line_spans.extend(transcription_spans);
-
-                let transcription_para =
-                    Paragraph::new(Line::from(line_spans)).wrap(Wrap { trim: false });
-                f.render_widget(transcription_para, chunks[0]);
-
-                // Render status line - only show controls when ready
-                let status_spans = if is_ready {
-                    vec![
-                        Span::styled(
-                            "Enter",
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(" finish • ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            "Ctrl+R",
-                            Style::default()
-                                .fg(Color::Blue)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(" restart • ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            "Ctrl+C",
-                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
-                    ]
-                } else {
-                    vec![]
-                };
-
-                let status_para = Paragraph::new(Line::from(status_spans));
-                f.render_widget(status_para, chunks[1]);
-            })?;
-        }
+            let status_para = Paragraph::new(Line::from(status_spans));
+            f.render_widget(status_para, chunks[1]);
+        })?;
 
         if app.should_quit {
-            // Clear the viewport before exiting
-            if let Some(ref mut term) = terminal {
-                term.draw(|_f| {
-                    // Draw empty frame to clear viewport
-                })?;
-            }
-            // Disable raw mode
-            terminal::disable_raw_mode()?;
+            terminal.show_cursor()?;
+            // Disable raw mode before exiting
+            terminal
+                .backend_mut()
+                .buffered_terminal_mut()
+                .terminal()
+                .set_cooked_mode()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
             return Ok(());
         }
 
-        // Handle input with timeout
-        if event::poll(tick_rate)? {
-            if let Event::Key(key) = event::read()? {
-                match key {
-                    KeyEvent {
-                        code: KeyCode::Enter,
-                        modifiers: KeyModifiers::NONE,
-                        ..
-                    } => {
-                        app.stop_listening();
-                        app.should_quit = true;
-                        app.exit_code = 0;
-                    }
-                    KeyEvent {
-                        code: KeyCode::Char('c'),
-                        modifiers: KeyModifiers::CONTROL,
-                        ..
-                    } => {
-                        app.stop_listening();
-                        app.should_quit = true;
-                        app.exit_code = 130; // Standard Ctrl+C exit code
-                    }
-                    KeyEvent {
-                        code: KeyCode::Char('r'),
-                        modifiers: KeyModifiers::CONTROL,
-                        ..
-                    } => {
-                        // Restart with fresh recognition session
-                        if let Err(e) = app.restart() {
-                            eprintln!("Failed to restart: {}", e);
-                            app.should_quit = true;
-                            app.exit_code = 1;
-                        }
-                    }
-                    _ => {}
+        // Handle input with timeout using termwiz
+        // termwiz uses /dev/tty directly, so it works even when stdout is piped
+        if let Some(event) = terminal
+            .backend_mut()
+            .buffered_terminal_mut()
+            .terminal()
+            .poll_input(Some(tick_rate))
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+        {
+            match event {
+                InputEvent::Key(KeyEvent {
+                    key: KeyCode::Enter,
+                    modifiers: Modifiers::NONE,
+                }) => {
+                    app.stop_listening();
+                    app.should_quit = true;
+                    app.exit_code = 0;
                 }
+                InputEvent::Key(KeyEvent {
+                    key: KeyCode::Char('c'),
+                    modifiers: Modifiers::CTRL,
+                }) => {
+                    app.stop_listening();
+                    app.should_quit = true;
+                    app.exit_code = 130; // Standard Ctrl+C exit code
+                }
+                InputEvent::Key(KeyEvent {
+                    key: KeyCode::Char('r'),
+                    modifiers: Modifiers::CTRL,
+                }) => {
+                    // Restart with fresh recognition session
+                    if let Err(e) = app.restart() {
+                        eprintln!("Failed to restart: {}", e);
+                        app.should_quit = true;
+                        app.exit_code = 1;
+                    }
+                }
+                _ => {}
             }
         }
     }
