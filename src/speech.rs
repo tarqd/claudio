@@ -17,12 +17,14 @@ mod macos {
     use super::*;
     use block2::RcBlock;
     use objc2::rc::Retained;
+    use objc2::ClassType;
     use objc2_avf_audio::{AVAudioEngine, AVAudioPCMBuffer, AVAudioTime};
     use objc2_foundation::{NSError, NSLocale};
     use objc2_speech::{
         SFSpeechAudioBufferRecognitionRequest, SFSpeechRecognitionResult,
         SFSpeechRecognitionTask, SFSpeechRecognizer,
     };
+    use std::ptr::NonNull;
 
     pub struct SpeechRecognizerImpl {
         recognizer: Retained<SFSpeechRecognizer>,
@@ -119,7 +121,7 @@ mod macos {
             // Install tap on input node to capture audio
             let request_for_tap = request.clone();
             let tap_block = RcBlock::new(
-                move |buffer: std::ptr::NonNull<AVAudioPCMBuffer>, _when: AVAudioTime| {
+                move |buffer: NonNull<AVAudioPCMBuffer>, _when: NonNull<AVAudioTime>| {
                     unsafe {
                         request_for_tap.appendAudioPCMBuffer(buffer.as_ref());
                     }
@@ -131,7 +133,7 @@ mod macos {
                     0,
                     1024,
                     Some(&format),
-                    Some(&tap_block),
+                    &*tap_block,
                 );
             }
 
