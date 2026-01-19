@@ -55,26 +55,29 @@ jobs:
           version: 1.0
 
       - name: Cache Vosk library
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' || runner.os == 'Windows'
         id: cache-vosk
         uses: actions/cache@v4
         with:
-          path: vosk-linux-x86_64-${{ env.VOSK_VERSION }}
-          key: vosk-linux-x86_64-${{ env.VOSK_VERSION }}
+          path: vosk-lib
+          key: vosk-${{ runner.os }}-${{ env.VOSK_VERSION }}
 
-      - name: Download Vosk library
-        if: runner.os == 'Linux' && steps.cache-vosk.outputs.cache-hit != 'true'
-        run: |
-          wget -q https://github.com/alphacep/vosk-api/releases/download/v${{ env.VOSK_VERSION }}/vosk-linux-x86_64-${{ env.VOSK_VERSION }}.zip
-          unzip -q vosk-linux-x86_64-${{ env.VOSK_VERSION }}.zip
+      - name: Fetch Vosk library
+        if: (runner.os == 'Linux' || runner.os == 'Windows') && steps.cache-vosk.outputs.cache-hit != 'true'
+        run: ./scripts/fetch-vosk.sh
+        shell: bash
 
-      - name: Install Vosk library
+      - name: Setup Vosk environment (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo cp vosk-linux-x86_64-${{ env.VOSK_VERSION }}/libvosk.so /usr/lib/
-          sudo ldconfig
-          echo "LIBRARY_PATH=/usr/lib" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/usr/lib" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$(pwd)/vosk-lib:$LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$(pwd)/vosk-lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+      - name: Setup Vosk environment (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "LIBRARY_PATH=$(pwd)/vosk-lib" >> $GITHUB_ENV
 
       - name: Build
         if: ${{ !inputs.release }}
@@ -88,17 +91,29 @@ jobs:
         if: ${{ !inputs.release }}
         run: cargo test --target ${{ matrix.target }}
 
-      - name: Package (Unix)
-        if: ${{ inputs.release && runner.os != 'Windows' }}
+      - name: Package (macOS)
+        if: ${{ inputs.release && runner.os == 'macOS' }}
         run: |
           cd target/${{ matrix.target }}/release
           tar -czvf ../../../claudio-${{ matrix.target }}.tar.gz claudio
 
+      - name: Package (Linux)
+        if: ${{ inputs.release && runner.os == 'Linux' }}
+        run: |
+          mkdir -p package
+          cp target/${{ matrix.target }}/release/claudio package/
+          cp vosk-lib/libvosk.so package/
+          cd package
+          tar -czvf ../claudio-${{ matrix.target }}.tar.gz .
+
       - name: Package (Windows)
         if: ${{ inputs.release && runner.os == 'Windows' }}
         run: |
-          cd target/${{ matrix.target }}/release
-          7z a ../../../claudio-${{ matrix.target }}.zip claudio.exe
+          mkdir package
+          cp target/${{ matrix.target }}/release/claudio.exe package/
+          cp vosk-lib/libvosk.dll package/
+          cd package
+          7z a ../claudio-${{ matrix.target }}.zip .
 
       - name: Upload artifact
         if: ${{ inputs.release }}

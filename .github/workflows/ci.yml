@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  VOSK_VERSION: "0.3.45"
+
 jobs:
   build:
     name: Build
@@ -16,8 +19,6 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    env:
-      VOSK_VERSION: "0.3.45"
 
     steps:
       - uses: actions/checkout@v4
@@ -40,21 +41,17 @@ jobs:
         id: cache-vosk
         uses: actions/cache@v4
         with:
-          path: vosk-linux-x86_64-${{ env.VOSK_VERSION }}
-          key: vosk-linux-x86_64-${{ env.VOSK_VERSION }}
+          path: vosk-lib
+          key: vosk-Linux-${{ env.VOSK_VERSION }}
 
-      - name: Download Vosk library
+      - name: Fetch Vosk library
         if: steps.cache-vosk.outputs.cache-hit != 'true'
-        run: |
-          wget -q https://github.com/alphacep/vosk-api/releases/download/v${{ env.VOSK_VERSION }}/vosk-linux-x86_64-${{ env.VOSK_VERSION }}.zip
-          unzip -q vosk-linux-x86_64-${{ env.VOSK_VERSION }}.zip
+        run: ./scripts/fetch-vosk.sh
 
-      - name: Install Vosk library
+      - name: Setup Vosk environment
         run: |
-          sudo cp vosk-linux-x86_64-${{ env.VOSK_VERSION }}/libvosk.so /usr/lib/
-          sudo ldconfig
-          echo "LIBRARY_PATH=/usr/lib" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/usr/lib" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$(pwd)/vosk-lib:$LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$(pwd)/vosk-lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Check formatting
         run: cargo fmt --check
