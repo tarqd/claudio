@@ -63,11 +63,10 @@ pub struct Ui {
     // Text state:
     // - frozen_text: from confirmed edits, always white
     // - text: current speech transcription
-    // - stable_len: chars that match previous render (don't re-animate)
+    // - stable_len: chars that are stable (white, no animation)
     frozen_text: String,
     text: String,
-    prev_text: String,      // Previous text for diff comparison
-    stable_len: usize,      // Characters that are stable (white, no animation)
+    stable_len: usize,
     animation_start_ms: f32,
 
     // Editing state
@@ -86,7 +85,6 @@ impl Ui {
             spinner_frame: 0,
             frozen_text: String::new(),
             text: String::new(),
-            prev_text: String::new(),
             stable_len: 0,
             animation_start_ms: 0.0,
             mode: Mode::Listening,
@@ -101,40 +99,42 @@ impl Ui {
         self.spinner_frame = self.spinner_frame.wrapping_add(1);
     }
 
-    /// Update speech text - compares with previous to find stable prefix.
-    /// Characters that match previous render stay white; changed/new chars animate.
+    /// Update speech text - compares with current to find stable prefix.
+    /// Characters that match current text stay white; changed/new chars animate.
     pub fn set_text(&mut self, text: &str, elapsed_ms: f32) {
         // Only update if not in editing mode
         if self.mode == Mode::Editing {
             return;
         }
 
-        // Find first differing character between prev_text and new text
-        let common_prefix_len = self.prev_text
+        // If text hasn't changed, keep current animation state
+        if text == self.text {
+            return;
+        }
+
+        // Find first differing character between current text and new text
+        let common_prefix_len = self.text
             .chars()
             .zip(text.chars())
             .take_while(|(a, b)| a == b)
             .count();
 
-        // The stable portion is the common prefix (capped at current stable_len for monotonicity)
-        // But if text changed, we need to recalculate from where it differs
-        let new_stable_len = common_prefix_len.min(text.chars().count());
-
-        // If we have new unstable characters (beyond current stable), start/adjust animation
-        let old_unstable_start = self.stable_len;
         let new_text_len = text.chars().count();
 
-        if new_text_len > new_stable_len && new_stable_len != old_unstable_start {
-            // Animation boundary changed - reset animation for new unstable region
+        // Stable portion = common prefix (text that didn't change)
+        // But never decrease stable_len - once stable, stays stable
+        let new_stable_len = common_prefix_len.max(self.stable_len.min(new_text_len));
+
+        // If there's new unstable text, reset animation for it
+        if new_text_len > new_stable_len && new_stable_len != self.stable_len {
             self.animation_start_ms = elapsed_ms;
-        } else if new_text_len > old_unstable_start && new_text_len > self.text.chars().count() {
-            // Text grew but stable boundary didn't change - adjust for new chars
+        } else if new_text_len > self.text.chars().count() {
+            // Text grew - adjust animation timing for new chars
             let new_chars = new_text_len - self.text.chars().count();
             self.animation_start_ms -= new_chars as f32 * CHAR_FADE_DELAY_MS;
         }
 
         self.stable_len = new_stable_len;
-        self.prev_text = self.text.clone();
         self.text = text.to_string();
     }
 
@@ -153,7 +153,6 @@ impl Ui {
     pub fn clear(&mut self) {
         self.frozen_text.clear();
         self.text.clear();
-        self.prev_text.clear();
         self.stable_len = 0;
         self.animation_start_ms = 0.0;
         self.cursor_pos = 0;
@@ -163,7 +162,6 @@ impl Ui {
     pub fn reset(&mut self) {
         self.frozen_text.clear();
         self.text.clear();
-        self.prev_text.clear();
         self.stable_len = 0;
         self.animation_start_ms = 0.0;
         self.cursor_pos = 0;
@@ -179,7 +177,6 @@ impl Ui {
         let full = self.full_text();
         self.frozen_text = full;
         self.text.clear();
-        self.prev_text.clear();
         self.stable_len = 0;
         self.cursor_pos = self.frozen_text.chars().count(); // Cursor at end
     }
@@ -207,7 +204,6 @@ impl Ui {
     pub fn cancel_editing(&mut self, original: &str) {
         self.frozen_text = original.to_string();
         self.text.clear();
-        self.prev_text.clear();
         self.stable_len = 0;
         self.mode = Mode::Listening;
     }
