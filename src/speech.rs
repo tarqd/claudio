@@ -6,6 +6,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
+use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 
@@ -19,10 +21,10 @@ mod macos {
     use objc2::rc::Retained;
     use objc2::AllocAnyThread;
     use objc2_avf_audio::{AVAudioEngine, AVAudioPCMBuffer, AVAudioTime};
-    use objc2_foundation::{NSError, NSLocale};
+    use objc2_foundation::{NSError, NSLocale, NSOperationQueue};
     use objc2_speech::{
         SFSpeechAudioBufferRecognitionRequest, SFSpeechRecognitionResult,
-        SFSpeechRecognitionTask, SFSpeechRecognizer,
+        SFSpeechRecognitionTask, SFSpeechRecognizer, SFSpeechRecognizerAuthorizationStatus,
     };
     use std::ptr::NonNull;
 
@@ -33,12 +35,17 @@ mod macos {
         task: Option<Retained<SFSpeechRecognitionTask>>,
         transcription: Arc<Mutex<String>>,
         is_listening: Arc<AtomicBool>,
+        is_ready: Arc<AtomicBool>,
+        // Keep blocks alive
+        _tap_block: Option<RcBlock<dyn Fn(NonNull<AVAudioPCMBuffer>, NonNull<AVAudioTime>)>>,
+        _handler: Option<RcBlock<dyn Fn(*mut SFSpeechRecognitionResult, *mut NSError)>>,
     }
 
     impl SpeechRecognizerImpl {
         pub fn new(
             transcription: Arc<Mutex<String>>,
             is_listening: Arc<AtomicBool>,
+            is_ready: Arc<AtomicBool>,
         ) -> Result<Self> {
             // Create speech recognizer with default locale
             let recognizer = unsafe {
@@ -55,6 +62,12 @@ mod macos {
                 ));
             }
 
+            // Set a custom operation queue for callbacks (CLI apps don't have a main run loop)
+            let queue = NSOperationQueue::new();
+            unsafe {
+                recognizer.setQueue(&queue);
+            }
+
             // Create audio engine
             let audio_engine = unsafe { AVAudioEngine::new() };
 
@@ -65,10 +78,59 @@ mod macos {
                 task: None,
                 transcription,
                 is_listening,
+                is_ready,
+                _tap_block: None,
+                _handler: None,
             })
         }
 
         pub fn start(&mut self) -> Result<()> {
+            // Check authorization status
+            let auth_status = unsafe { SFSpeechRecognizer::authorizationStatus() };
+
+            // Request authorization if not determined
+            if auth_status.0 == 0 {
+                let auth_granted = Arc::new(Mutex::new(None));
+                let auth_granted_clone = Arc::clone(&auth_granted);
+
+                let handler = block2::RcBlock::new(move |status: SFSpeechRecognizerAuthorizationStatus| {
+                    if let Ok(mut granted) = auth_granted_clone.lock() {
+                        *granted = Some(status.0 == 3);
+                    }
+                });
+
+                unsafe {
+                    SFSpeechRecognizer::requestAuthorization(&handler);
+                }
+
+                // Wait for authorization response (with timeout)
+                for _ in 0..50 {
+                    thread::sleep(Duration::from_millis(100));
+                    if let Ok(granted) = auth_granted.lock() {
+                        if let Some(is_granted) = *granted {
+                            if !is_granted {
+                                return Err(anyhow!(
+                                    "Speech recognition permission denied. Please grant permission in System Settings."
+                                ));
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // Final check
+                let final_status = unsafe { SFSpeechRecognizer::authorizationStatus() };
+                if final_status.0 != 3 {
+                    return Err(anyhow!(
+                        "Speech recognition not authorized. Please grant permission when prompted."
+                    ));
+                }
+            } else if auth_status.0 != 3 {
+                return Err(anyhow!(
+                    "Speech recognition permission denied. Please enable it in System Settings > Privacy & Security > Speech Recognition."
+                ));
+            }
+
             // Create recognition request
             let request = unsafe { SFSpeechAudioBufferRecognitionRequest::new() };
 
@@ -85,6 +147,8 @@ mod macos {
             // Set up the recognition handler
             let transcription = Arc::clone(&self.transcription);
             let is_listening = Arc::clone(&self.is_listening);
+            let is_listening_for_tap = Arc::clone(&self.is_listening);
+            let is_ready_for_tap = Arc::clone(&self.is_ready);
 
             let handler = RcBlock::new(
                 move |result: *mut SFSpeechRecognitionResult, error: *mut NSError| {
@@ -99,7 +163,7 @@ mod macos {
                     let result = unsafe { &*result };
                     let best_transcription = unsafe { result.bestTranscription() };
                     let formatted_string = unsafe { best_transcription.formattedString() };
-                    let text = unsafe { formatted_string.to_string() };
+                    let text = formatted_string.to_string();
 
                     if let Ok(mut trans) = transcription.lock() {
                         *trans = text;
@@ -120,8 +184,16 @@ mod macos {
 
             // Install tap on input node to capture audio
             let request_for_tap = request.clone();
+            let buffer_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let tap_block = RcBlock::new(
                 move |buffer: NonNull<AVAudioPCMBuffer>, _when: NonNull<AVAudioTime>| {
+                    // Count audio buffers and set ready after warmup period
+                    let count = buffer_count.fetch_add(1, Ordering::SeqCst);
+                    if count >= 10 {
+                        // After ~10 buffers (~200ms at 1024 samples/buffer), we're ready
+                        is_ready_for_tap.store(true, Ordering::SeqCst);
+                        is_listening_for_tap.store(true, Ordering::SeqCst);
+                    }
                     unsafe {
                         request_for_tap.appendAudioPCMBuffer(buffer.as_ref());
                     }
@@ -148,9 +220,12 @@ mod macos {
                     .map_err(|e| anyhow!("Failed to start audio engine: {:?}", e))?;
             }
 
-            self.is_listening.store(true, Ordering::SeqCst);
             self.request = Some(request);
             self.task = Some(task);
+            self._tap_block = Some(tap_block);
+            self._handler = Some(handler);
+
+            // is_listening will be set to true by the tap callback once audio is flowing
 
             Ok(())
         }
@@ -178,6 +253,8 @@ mod macos {
 
             self.request = None;
             self.task = None;
+            self._tap_block = None;
+            self._handler = None;
         }
     }
 
@@ -198,6 +275,7 @@ mod mock {
     pub struct SpeechRecognizerImpl {
         transcription: Arc<Mutex<String>>,
         is_listening: Arc<AtomicBool>,
+        is_ready: Arc<AtomicBool>,
         stop_signal: Arc<AtomicBool>,
     }
 
@@ -205,15 +283,18 @@ mod mock {
         pub fn new(
             transcription: Arc<Mutex<String>>,
             is_listening: Arc<AtomicBool>,
+            is_ready: Arc<AtomicBool>,
         ) -> Result<Self> {
             Ok(Self {
                 transcription,
                 is_listening,
+                is_ready,
                 stop_signal: Arc::new(AtomicBool::new(false)),
             })
         }
 
         pub fn start(&mut self) -> Result<()> {
+            self.is_ready.store(true, Ordering::SeqCst);
             self.is_listening.store(true, Ordering::SeqCst);
             self.stop_signal.store(false, Ordering::SeqCst);
 
