@@ -125,13 +125,27 @@ impl Ui {
         // But never decrease stable_len - once stable, stays stable
         let new_stable_len = common_prefix_len.max(self.stable_len.min(new_text_len));
 
-        // If there's new unstable text, reset animation for it
-        if new_text_len > new_stable_len && new_stable_len != self.stable_len {
-            self.animation_start_ms = elapsed_ms;
-        } else if new_text_len > self.text.chars().count() {
-            // Text grew - adjust animation timing for new chars
-            let new_chars = new_text_len - self.text.chars().count();
-            self.animation_start_ms -= new_chars as f32 * CHAR_FADE_DELAY_MS;
+        // Handle animation timing for unstable text
+        if new_text_len > new_stable_len {
+            if self.text.is_empty() || new_stable_len != self.stable_len {
+                // First text or stable boundary changed - start animation now
+                self.animation_start_ms = elapsed_ms;
+            } else {
+                // Compare unstable portions to detect content changes vs extensions
+                let old_unstable: String = self.text.chars().skip(self.stable_len).collect();
+                let new_unstable: String = text.chars().skip(new_stable_len).collect();
+
+                if new_unstable.starts_with(&old_unstable) {
+                    // New text extends old unstable text - adjust timing for new chars
+                    let new_chars = new_unstable.chars().count() - old_unstable.chars().count();
+                    if new_chars > 0 {
+                        self.animation_start_ms -= new_chars as f32 * CHAR_FADE_DELAY_MS;
+                    }
+                } else {
+                    // Unstable portion content changed (correction) - reset animation
+                    self.animation_start_ms = elapsed_ms;
+                }
+            }
         }
 
         self.stable_len = new_stable_len;
