@@ -334,6 +334,9 @@ impl<T: Terminal> InlineTerminal<T> {
         if width != size.cols {
             self.surface.resize(size.cols, height);
             self.surface.invalidate();
+            // Reset tracking - our position assumptions are invalid after resize
+            self.rendered_height = 0;
+            self.cursor_row = 0;
             Ok(true)
         } else {
             Ok(false)
