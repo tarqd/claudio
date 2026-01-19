@@ -42,7 +42,7 @@ Display is always `frozen_text + live_transcription`. This enables:
 | Enter | Submit full transcription |
 | Ctrl+E | Enter inline edit mode |
 | Ctrl+Shift+E | Open $EDITOR directly (hidden shortcut) |
-| Ctrl+R | Restart (clear everything) |
+| Ctrl+D | Discard and restart |
 | Ctrl+C | Cancel (exit 130) |
 
 **Edit Mode:**
@@ -50,7 +50,8 @@ Display is always `frozen_text + live_transcription`. This enables:
 |-----|--------|
 | Ctrl+S | Confirm edits, resume recording |
 | Ctrl+E | Escalate to $EDITOR |
-| Esc | Discard edits, resume recording |
+| Ctrl+D | Discard edits, resume recording |
+| Esc | Discard edits (alias for Ctrl+D) |
 
 ### Edit Mode Flow
 
@@ -59,7 +60,7 @@ Display is always `frozen_text + live_transcription`. This enables:
 2. Populate `tui-textarea` with frozen + live text
 3. User edits inline with full cursor control
 4. Ctrl+S confirms → frozen = edited, live = "", restart recognition
-5. Esc discards → keep original, restart recognition
+5. Ctrl+D/Esc discards → keep original, restart recognition
 
 **External editor (Ctrl+E from edit mode):**
 1. Write textarea content to temp file

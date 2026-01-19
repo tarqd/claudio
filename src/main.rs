@@ -553,8 +553,8 @@ fn run_app(app: &mut App) -> Result<()> {
                                 Span::styled(" finish • ", Style::default().fg(Color::DarkGray)),
                                 Span::styled("Ctrl+E", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
                                 Span::styled(" edit • ", Style::default().fg(Color::DarkGray)),
-                                Span::styled("Ctrl+R", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
-                                Span::styled(" restart • ", Style::default().fg(Color::DarkGray)),
+                                Span::styled("Ctrl+D", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                                Span::styled(" discard • ", Style::default().fg(Color::DarkGray)),
                                 Span::styled("Ctrl+C", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                                 Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
                             ]
@@ -568,7 +568,7 @@ fn run_app(app: &mut App) -> Result<()> {
                             Span::styled(" done • ", Style::default().fg(Color::DarkGray)),
                             Span::styled("Ctrl+E", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
                             Span::styled(" $EDITOR • ", Style::default().fg(Color::DarkGray)),
-                            Span::styled("Esc", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                            Span::styled("Ctrl+D", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                             Span::styled(" discard", Style::default().fg(Color::DarkGray)),
                         ]
                     }
@@ -616,11 +616,11 @@ fn run_app(app: &mut App) -> Result<()> {
                                 app.exit_code = 130; // Standard Ctrl+C exit code
                             }
                             KeyEvent {
-                                code: KeyCode::Char('r'),
+                                code: KeyCode::Char('d'),
                                 modifiers: KeyModifiers::CONTROL,
                                 ..
                             } => {
-                                // Restart with fresh recognition session
+                                // Discard and restart with fresh recognition session
                                 if let Err(e) = app.restart() {
                                     eprintln!("Failed to restart: {}", e);
                                     app.should_quit = true;
@@ -665,6 +665,10 @@ fn run_app(app: &mut App) -> Result<()> {
                                 }
                             }
                             KeyEvent {
+                                code: KeyCode::Char('d'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } | KeyEvent {
                                 code: KeyCode::Esc,
                                 ..
                             } => {

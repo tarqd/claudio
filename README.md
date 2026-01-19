@@ -58,13 +58,13 @@ The TUI runs on stderr, so you see the interface while the transcription flows c
 ### Recording Mode
 - **Enter** - Finish recording and submit transcription
 - **Ctrl+E** - Enter inline edit mode
-- **Ctrl+R** - Clear and restart (keeps recording)
+- **Ctrl+D** - Discard and restart
 - **Ctrl+C** - Cancel and exit
 
 ### Edit Mode
 - **Ctrl+S** - Confirm edits and resume recording
 - **Ctrl+E** - Open in `$EDITOR` for complex edits
-- **Esc** - Discard edits and resume recording
+- **Ctrl+D** - Discard edits and resume recording (Esc also works)
 
 ## Visual States
 
