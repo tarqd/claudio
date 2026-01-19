@@ -62,9 +62,9 @@ The TUI runs on stderr, so you see the interface while the transcription flows c
 - **Ctrl+C** - Cancel and exit
 
 ### Edit Mode
-- **Esc** - Confirm edits and resume recording
+- **Ctrl+S** - Confirm edits and resume recording
 - **Ctrl+E** - Open in `$EDITOR` for complex edits
-- **Ctrl+C** - Discard edits and resume recording
+- **Esc** - Discard edits and resume recording
 
 ## Visual States
 

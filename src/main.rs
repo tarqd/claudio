@@ -498,11 +498,11 @@ fn run_app(app: &mut App) -> Result<()> {
                     }
                     AppMode::Editing => {
                         vec![
-                            Span::styled("Esc", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                            Span::styled("Ctrl+S", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
                             Span::styled(" done • ", Style::default().fg(Color::DarkGray)),
                             Span::styled("Ctrl+E", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
                             Span::styled(" $EDITOR • ", Style::default().fg(Color::DarkGray)),
-                            Span::styled("Ctrl+C", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                            Span::styled("Esc", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                             Span::styled(" discard", Style::default().fg(Color::DarkGray)),
                         ]
                     }
@@ -575,7 +575,8 @@ fn run_app(app: &mut App) -> Result<()> {
                     AppMode::Editing => {
                         match key {
                             KeyEvent {
-                                code: KeyCode::Esc,
+                                code: KeyCode::Char('s'),
+                                modifiers: KeyModifiers::CONTROL,
                                 ..
                             } => {
                                 // Confirm edits and resume recording
@@ -586,11 +587,10 @@ fn run_app(app: &mut App) -> Result<()> {
                                 }
                             }
                             KeyEvent {
-                                code: KeyCode::Char('c'),
-                                modifiers: KeyModifiers::CONTROL,
+                                code: KeyCode::Esc,
                                 ..
                             } => {
-                                // Cancel edits and resume recording
+                                // Discard edits and resume recording
                                 if let Err(e) = app.cancel_edit_mode() {
                                     eprintln!("Failed to cancel edit mode: {}", e);
                                     app.should_quit = true;
