@@ -4,6 +4,8 @@
 //! renders a fixed-height region at the current cursor position. It supports
 //! efficient differential updates without clearing existing terminal content.
 
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
 use termwiz::cell::{Cell, CellAttributes};
 use termwiz::color::ColorAttribute;
@@ -11,6 +13,8 @@ use termwiz::surface::change::Change;
 use termwiz::surface::line::Line;
 use termwiz::surface::{CursorVisibility, Position};
 use termwiz::terminal::Terminal;
+
+const RESIZE_DEBOUNCE_MS: u64 = 150;
 
 /// A surface for inline terminal rendering.
 ///
@@ -302,6 +306,7 @@ pub struct InlineTerminal<T: Terminal> {
     surface: InlineSurface,
     rendered_height: usize,  // Height of region we've rendered
     cursor_row: usize,       // Row cursor is at after render (0 = top of region)
+    pending_resize: Option<(usize, Instant)>,  // (new_width, detected_at) for debouncing
 }
 
 impl<T: Terminal> InlineTerminal<T> {
@@ -314,6 +319,7 @@ impl<T: Terminal> InlineTerminal<T> {
             surface,
             rendered_height: 0,
             cursor_row: 0,
+            pending_resize: None,
         })
     }
 
@@ -327,30 +333,42 @@ impl<T: Terminal> InlineTerminal<T> {
         &mut self.surface
     }
 
-    /// Check for terminal resize and update surface width
+    /// Check for terminal resize and update surface width (debounced)
     pub fn check_for_resize(&mut self) -> Result<bool> {
         let size = self.terminal.get_screen_size().map_err(|e| anyhow::anyhow!("{}", e))?;
-        let (width, height) = self.surface.dimensions();
-        if width != size.cols {
-            // Terminal resized - our position tracking is now invalid
-            // Scroll past any mess by printing newlines, then start fresh
-            if self.rendered_height > 0 {
-                let mut changes = Vec::new();
-                // Print newlines to scroll past old content
-                for _ in 0..self.rendered_height {
-                    changes.push(Change::Text("\n".to_string()));
-                }
-                self.terminal.render(&changes).map_err(|e| anyhow::anyhow!("{}", e))?;
-            }
+        let (current_width, height) = self.surface.dimensions();
 
-            self.surface.resize(size.cols, height);
-            self.surface.invalidate();
-            self.rendered_height = 0;
-            self.cursor_row = 0;
-            Ok(true)
-        } else {
-            Ok(false)
+        // Check if terminal width changed
+        if size.cols != current_width {
+            // Width changed - record/update the pending resize
+            self.pending_resize = Some((size.cols, Instant::now()));
+            return Ok(false); // Don't act yet, wait for debounce
         }
+
+        // Check if we have a pending resize that's settled
+        if let Some((new_width, detected_at)) = self.pending_resize {
+            if detected_at.elapsed() >= Duration::from_millis(RESIZE_DEBOUNCE_MS) {
+                // Resize has settled - apply it
+                self.pending_resize = None;
+
+                // Scroll past any mess by printing newlines, then start fresh
+                if self.rendered_height > 0 {
+                    let mut changes = Vec::new();
+                    for _ in 0..self.rendered_height {
+                        changes.push(Change::Text("\n".to_string()));
+                    }
+                    self.terminal.render(&changes).map_err(|e| anyhow::anyhow!("{}", e))?;
+                }
+
+                self.surface.resize(new_width, height);
+                self.surface.invalidate();
+                self.rendered_height = 0;
+                self.cursor_row = 0;
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     /// Resize the height of the inline terminal
