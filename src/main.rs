@@ -33,7 +33,7 @@ use tui_textarea::TextArea;
 mod speech;
 use speech::SpeechRecognizer;
 
-const LISTENING_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
+const LISTENING_FRAMES: [&str; 4] = ["∙", "●", "◎", "◉"];
 const WAITING_FRAMES: [&str; 12] = ["⠋", "⠙", "⠹", "⠸", "⢰", "⣰", "⣠", "⣄", "⣆", "⡆", "⠇", "⠏"];
 const CHAR_DELAY_MS: f32 = 20.0; // Delay between each character appearing
 const SHIMMER_SPEED: f32 = 1.0;  // Speed of the shimmer wave (slower = more subtle)
@@ -129,6 +129,37 @@ impl<'a> App<'a> {
         self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
         self.recognizer.as_mut().unwrap().start()?;
 
+        Ok(())
+    }
+
+    /// Toggle pause state. When pausing, freezes current live text.
+    /// When resuming, starts a new recognition session.
+    fn toggle_pause(&mut self) -> Result<()> {
+        if self.is_paused {
+            // Resume - start new recognition session
+            self.is_paused = false;
+            self.is_ready.store(false, Ordering::SeqCst);
+
+            let transcription = Arc::clone(&self.live_transcription);
+            let is_listening = Arc::clone(&self.is_listening);
+            let is_ready = Arc::clone(&self.is_ready);
+
+            self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
+            self.recognizer.as_mut().unwrap().start()?;
+        } else {
+            // Pause - stop listening, freeze live text
+            self.stop_listening();
+            self.is_paused = true;
+
+            // Freeze current live transcription
+            let live = self.live_transcription.lock().unwrap().clone();
+            self.frozen_text.push_str(&live);
+            self.live_transcription.lock().unwrap().clear();
+
+            // Reset animation state for next session
+            self.previous_transcription_len = 0;
+            self.animation_start_index = 0;
+        }
         Ok(())
     }
 
@@ -514,17 +545,19 @@ fn run_app(app: &mut App) -> Result<()> {
                         );
 
                         // Render transcription with spinner at the start
-                        let (spinner, spinner_style) = if !is_ready {
-                            (WAITING_FRAMES[app.animation_frame],
+                        let (spinner, spinner_style) = if app.is_paused {
+                            // Paused - gray hollow dot
+                            ("○", Style::default().fg(Color::DarkGray))
+                        } else if !is_ready {
+                            // Warming up - braille spinner
+                            (WAITING_FRAMES[app.animation_frame % WAITING_FRAMES.len()],
                              Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))
                         } else if is_listening {
-                            let pulse_progress = (app.animation_frame as f32 / LISTENING_FRAMES.len() as f32) * std::f32::consts::PI;
-                            let pulse = (pulse_progress.sin() + 1.0) / 2.0;
-                            let min_brightness = 200;
-                            let max_brightness = 255;
-                            let brightness = (min_brightness as f32 + pulse * (max_brightness - min_brightness) as f32) as u8;
-                            ("●", Style::default().fg(Color::Rgb(brightness, 0, 0)).add_modifier(Modifier::BOLD))
+                            // Recording - cycle through dot symbols in red
+                            (LISTENING_FRAMES[app.animation_frame % LISTENING_FRAMES.len()],
+                             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
                         } else {
+                            // Not listening (recognition ended)
                             ("○", Style::default().fg(Color::DarkGray))
                         };
 
@@ -549,16 +582,27 @@ fn run_app(app: &mut App) -> Result<()> {
                 let status_spans = match app.mode {
                     AppMode::Recording => {
                         let is_ready = app.is_ready.load(Ordering::SeqCst);
-                        if is_ready {
+                        if app.is_paused {
                             vec![
+                                Span::styled("PAUSED", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+                                Span::styled(" • ", Style::default().fg(Color::DarkGray)),
+                                Span::styled("Space", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                                Span::styled(" resume • ", Style::default().fg(Color::DarkGray)),
                                 Span::styled("Enter", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
                                 Span::styled(" finish • ", Style::default().fg(Color::DarkGray)),
                                 Span::styled("Ctrl+E", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                                Span::styled(" edit", Style::default().fg(Color::DarkGray)),
+                            ]
+                        } else if is_ready {
+                            vec![
+                                Span::styled("Enter", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                                Span::styled(" finish • ", Style::default().fg(Color::DarkGray)),
+                                Span::styled("Space", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                                Span::styled(" pause • ", Style::default().fg(Color::DarkGray)),
+                                Span::styled("Ctrl+E", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
                                 Span::styled(" edit • ", Style::default().fg(Color::DarkGray)),
                                 Span::styled("Ctrl+D", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
-                                Span::styled(" discard • ", Style::default().fg(Color::DarkGray)),
-                                Span::styled("Ctrl+C", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                                Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+                                Span::styled(" discard", Style::default().fg(Color::DarkGray)),
                             ]
                         } else {
                             vec![]
@@ -645,6 +689,18 @@ fn run_app(app: &mut App) -> Result<()> {
                                 // Direct to $EDITOR (power user shortcut)
                                 if let Err(e) = app.open_external_editor_direct() {
                                     eprintln!("Failed to open editor: {}", e);
+                                    app.should_quit = true;
+                                    app.exit_code = 1;
+                                }
+                            }
+                            KeyEvent {
+                                code: KeyCode::Char(' '),
+                                modifiers: KeyModifiers::NONE,
+                                ..
+                            } => {
+                                // Toggle pause
+                                if let Err(e) = app.toggle_pause() {
+                                    eprintln!("Failed to toggle pause: {}", e);
                                     app.should_quit = true;
                                     app.exit_code = 1;
                                 }
