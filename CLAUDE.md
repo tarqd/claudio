@@ -36,22 +36,36 @@ Display is always `frozen_text + live_transcription`. This enables:
 
 ### Controls
 
+**Recording Mode:**
 | Key | Action |
 |-----|--------|
 | Enter | Submit full transcription |
-| Ctrl+E | Edit in $EDITOR |
+| Ctrl+E | Enter inline edit mode |
 | Ctrl+R | Restart (clear everything) |
 | Ctrl+C | Cancel (exit 130) |
 
+**Edit Mode:**
+| Key | Action |
+|-----|--------|
+| Esc | Confirm edits, resume recording |
+| Ctrl+E | Escalate to $EDITOR |
+| Ctrl+C | Discard edits, resume recording |
+
 ### Edit Mode Flow
 
+**Inline editing (Ctrl+E from recording):**
 1. Stop recognition
-2. Combine frozen + live → temp file
-3. Suspend TUI (disable raw mode, clear viewport)
-4. Spawn `$VISUAL` → `$EDITOR` → `vi`
-5. Restore TUI
-6. If editor succeeded: `frozen = edited`, `live = ""`
-7. Restart recognition
+2. Populate `tui-textarea` with frozen + live text
+3. User edits inline with full cursor control
+4. Esc confirms → frozen = edited, live = "", restart recognition
+5. Ctrl+C discards → keep original, restart recognition
+
+**External editor (Ctrl+E from edit mode):**
+1. Write textarea content to temp file
+2. Suspend TUI (disable raw mode, clear viewport)
+3. Spawn `$VISUAL` → `$EDITOR` → `vi`
+4. Restore TUI, update textarea with edited content
+5. Stay in edit mode (user can continue editing or Esc to confirm)
 
 ### Animation System
 
