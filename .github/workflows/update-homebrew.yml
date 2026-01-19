@@ -1,6 +1,15 @@
 name: Update Homebrew Tap
 
 on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version (without v prefix, e.g. 0.1.0)'
+        required: true
+        type: string
+    secrets:
+      HOMEBREW_TAP_TOKEN:
+        required: true
   workflow_dispatch:
     inputs:
       version:
