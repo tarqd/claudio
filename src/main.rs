@@ -3,7 +3,7 @@
 //! A CLI tool that listens via microphone and transcribes speech in real-time.
 
 use std::{
-    env,
+    env, fs,
     io::{stderr, Write},
     process::Command,
     sync::{
@@ -15,8 +15,10 @@ use std::{
 
 use anyhow::Result;
 use crossterm::{
+    cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
-    terminal,
+    execute,
+    terminal::{self, Clear, ClearType},
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout},
@@ -25,21 +27,34 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
     TerminalOptions, Viewport,
 };
+use tui_textarea::TextArea;
 
 mod speech;
 use speech::SpeechRecognizer;
 
-const LISTENING_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
+const LISTENING_FRAMES: [&str; 3] = ["●", "◎", "◉"];
 const WAITING_FRAMES: [&str; 12] = ["⠋", "⠙", "⠹", "⠸", "⢰", "⣰", "⣠", "⣄", "⣆", "⡆", "⠇", "⠏"];
 const CHAR_DELAY_MS: f32 = 20.0; // Delay between each character appearing
 const SHIMMER_SPEED: f32 = 1.0; // Speed of the shimmer wave (slower = more subtle)
 
-struct App {
-    transcription: Arc<Mutex<String>>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppMode {
+    Recording,
+    Editing,
+}
+
+struct App<'a> {
+    mode: AppMode,
+    textarea: TextArea<'a>,
+    /// Text that has been edited/finalized (not being transcribed)
+    frozen_text: String,
+    /// Current recognition session output (shared with speech callback)
+    live_transcription: Arc<Mutex<String>>,
     previous_transcription_len: usize,
     animation_start_index: usize,
     is_listening: Arc<AtomicBool>,
     is_ready: Arc<AtomicBool>,
+    is_paused: bool,
     should_quit: bool,
     exit_code: i32,
     animation_frame: usize,
@@ -50,14 +65,18 @@ struct App {
     shimmer_offset: f32,
 }
 
-impl App {
+impl<'a> App<'a> {
     fn new() -> Self {
         Self {
-            transcription: Arc::new(Mutex::new(String::new())),
+            mode: AppMode::Recording,
+            textarea: TextArea::default(),
+            frozen_text: String::new(),
+            live_transcription: Arc::new(Mutex::new(String::new())),
             previous_transcription_len: 0,
             animation_start_index: 0,
             is_listening: Arc::new(AtomicBool::new(false)),
             is_ready: Arc::new(AtomicBool::new(false)),
+            is_paused: false,
             should_quit: false,
             exit_code: 0,
             animation_frame: 0,
@@ -70,7 +89,7 @@ impl App {
     }
 
     fn start_listening(&mut self) -> Result<()> {
-        let transcription = Arc::clone(&self.transcription);
+        let transcription = Arc::clone(&self.live_transcription);
         let is_listening = Arc::clone(&self.is_listening);
         let is_ready = Arc::clone(&self.is_ready);
 
@@ -95,8 +114,9 @@ impl App {
         // Stop current recognition session
         self.stop_listening();
 
-        // Clear transcription buffer
-        self.transcription.lock().unwrap().clear();
+        // Clear both transcription buffers
+        self.frozen_text.clear();
+        self.live_transcription.lock().unwrap().clear();
 
         // Reset animation state
         self.previous_transcription_len = 0;
@@ -105,7 +125,7 @@ impl App {
         self.is_ready.store(false, Ordering::SeqCst);
 
         // Start fresh recognition session
-        let transcription = Arc::clone(&self.transcription);
+        let transcription = Arc::clone(&self.live_transcription);
         let is_listening = Arc::clone(&self.is_listening);
         let is_ready = Arc::clone(&self.is_ready);
 
@@ -119,14 +139,56 @@ impl App {
         Ok(())
     }
 
+    /// Toggle pause state. When pausing, freezes current live text.
+    /// When resuming, starts a new recognition session.
+    fn toggle_pause(&mut self) -> Result<()> {
+        if self.is_paused {
+            // Resume - start new recognition session
+            self.is_paused = false;
+            self.is_ready.store(false, Ordering::SeqCst);
+
+            let transcription = Arc::clone(&self.live_transcription);
+            let is_listening = Arc::clone(&self.is_listening);
+            let is_ready = Arc::clone(&self.is_ready);
+
+            self.recognizer = Some(SpeechRecognizer::new(
+                transcription,
+                is_listening,
+                is_ready,
+            )?);
+            self.recognizer.as_mut().unwrap().start()?;
+        } else {
+            // Pause - stop listening, freeze live text
+            self.stop_listening();
+            self.is_paused = true;
+
+            // Freeze current live transcription
+            let live = self.live_transcription.lock().unwrap().clone();
+            self.frozen_text.push_str(&live);
+            self.live_transcription.lock().unwrap().clear();
+
+            // Reset animation state for next session
+            self.previous_transcription_len = 0;
+            self.animation_start_index = 0;
+        }
+        Ok(())
+    }
+
+    /// Returns the complete transcription (frozen + live)
+    fn full_transcription(&self) -> String {
+        let live = self.live_transcription.lock().unwrap();
+        format!("{}{}", self.frozen_text, &*live)
+    }
+
     fn get_final_transcription(&self) -> String {
-        self.transcription.lock().unwrap().clone()
+        self.full_transcription()
     }
 
     fn update_transcription_state(&mut self) {
-        let transcription = self.transcription.lock().unwrap();
-        let current_len = transcription.chars().count();
-        drop(transcription);
+        // Animation state is relative to live_transcription only
+        let live = self.live_transcription.lock().unwrap();
+        let current_len = live.chars().count();
+        drop(live);
 
         if current_len != self.previous_transcription_len {
             self.transcription_start_time = Instant::now();
@@ -146,6 +208,220 @@ impl App {
         if self.shimmer_offset > 1000.0 {
             self.shimmer_offset = 0.0;
         }
+    }
+
+    /// Enters inline edit mode with the textarea.
+    fn enter_edit_mode(&mut self) {
+        // Stop recognition while editing
+        self.stop_listening();
+
+        // Populate textarea with current transcription
+        let current_text = self.full_transcription();
+        let lines: Vec<String> = current_text.lines().map(String::from).collect();
+        self.textarea = TextArea::new(if lines.is_empty() {
+            vec![String::new()]
+        } else {
+            lines
+        });
+
+        // Style the textarea
+        self.textarea.set_cursor_line_style(Style::default());
+        self.textarea
+            .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+
+        // Move cursor to end
+        self.textarea.move_cursor(tui_textarea::CursorMove::Bottom);
+        self.textarea.move_cursor(tui_textarea::CursorMove::End);
+
+        self.mode = AppMode::Editing;
+    }
+
+    /// Exits edit mode, applies changes, and resumes recording.
+    fn exit_edit_mode(&mut self) -> Result<()> {
+        // Get edited content from textarea
+        let edited = self.textarea.lines().join("\n");
+
+        // Apply edits to frozen text, clear live
+        self.frozen_text = edited;
+        self.live_transcription.lock().unwrap().clear();
+
+        // Reset animation state
+        self.previous_transcription_len = 0;
+        self.animation_start_index = 0;
+        self.transcription_start_time = Instant::now();
+        self.is_ready.store(false, Ordering::SeqCst);
+
+        // Restart recognition
+        let transcription = Arc::clone(&self.live_transcription);
+        let is_listening = Arc::clone(&self.is_listening);
+        let is_ready = Arc::clone(&self.is_ready);
+
+        self.recognizer = Some(SpeechRecognizer::new(
+            transcription,
+            is_listening,
+            is_ready,
+        )?);
+        self.recognizer.as_mut().unwrap().start()?;
+
+        self.mode = AppMode::Recording;
+        Ok(())
+    }
+
+    /// Cancels edit mode without applying changes, resumes recording.
+    fn cancel_edit_mode(&mut self) -> Result<()> {
+        // Restore original text to frozen (combine what was frozen + live before editing)
+        // Since we already stopped recognition in enter_edit_mode, live is stale
+        // The textarea was populated with the combined text, so we can just
+        // leave frozen_text as-is and restart
+
+        // Reset animation state
+        self.previous_transcription_len = 0;
+        self.animation_start_index = 0;
+        self.transcription_start_time = Instant::now();
+        self.is_ready.store(false, Ordering::SeqCst);
+
+        // Restart recognition
+        let transcription = Arc::clone(&self.live_transcription);
+        let is_listening = Arc::clone(&self.is_listening);
+        let is_ready = Arc::clone(&self.is_ready);
+
+        self.recognizer = Some(SpeechRecognizer::new(
+            transcription,
+            is_listening,
+            is_ready,
+        )?);
+        self.recognizer.as_mut().unwrap().start()?;
+
+        self.mode = AppMode::Recording;
+        Ok(())
+    }
+
+    /// Opens the current transcription in $EDITOR for more complex editing.
+    /// Called when pressing Ctrl+E while already in edit mode.
+    fn open_external_editor(&mut self) -> Result<()> {
+        // Get current textarea content
+        let current_text = self.textarea.lines().join("\n");
+
+        // Write to temp file
+        let temp_path = env::temp_dir().join("claudio_edit.txt");
+        fs::write(&temp_path, &current_text)?;
+
+        // Suspend TUI - disable raw mode and clear the inline viewport area
+        terminal::disable_raw_mode()?;
+        execute!(
+            stderr(),
+            cursor::MoveUp(self.viewport_height),
+            Clear(ClearType::FromCursorDown)
+        )?;
+
+        // Find editor: $VISUAL -> $EDITOR -> vi
+        let editor = env::var("VISUAL")
+            .or_else(|_| env::var("EDITOR"))
+            .unwrap_or_else(|_| "vi".to_string());
+
+        // Spawn editor and wait
+        let status = Command::new(&editor).arg(&temp_path).status();
+
+        // Restore TUI
+        terminal::enable_raw_mode()?;
+
+        // Handle editor result
+        match status {
+            Ok(exit_status) if exit_status.success() => {
+                // Update textarea with edited content
+                let edited = fs::read_to_string(&temp_path).unwrap_or(current_text);
+                let lines: Vec<String> = edited.lines().map(String::from).collect();
+                self.textarea = TextArea::new(if lines.is_empty() {
+                    vec![String::new()]
+                } else {
+                    lines
+                });
+                self.textarea.set_cursor_line_style(Style::default());
+                self.textarea
+                    .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+                self.textarea.move_cursor(tui_textarea::CursorMove::Bottom);
+                self.textarea.move_cursor(tui_textarea::CursorMove::End);
+            }
+            _ => {
+                // Editor cancelled or failed - keep textarea as-is
+            }
+        }
+
+        // Clean up temp file (ignore errors)
+        let _ = fs::remove_file(&temp_path);
+
+        // Stay in edit mode
+        Ok(())
+    }
+
+    /// Opens $EDITOR directly from recording mode (Ctrl+Shift+E).
+    /// Bypasses inline edit mode for power users.
+    fn open_external_editor_direct(&mut self) -> Result<()> {
+        // Stop recognition
+        self.stop_listening();
+
+        // Get current transcription
+        let current_text = self.full_transcription();
+
+        // Write to temp file
+        let temp_path = env::temp_dir().join("claudio_edit.txt");
+        fs::write(&temp_path, &current_text)?;
+
+        // Suspend TUI
+        terminal::disable_raw_mode()?;
+        execute!(
+            stderr(),
+            cursor::MoveUp(self.viewport_height),
+            Clear(ClearType::FromCursorDown)
+        )?;
+
+        // Find editor
+        let editor = env::var("VISUAL")
+            .or_else(|_| env::var("EDITOR"))
+            .unwrap_or_else(|_| "vi".to_string());
+
+        // Spawn editor and wait
+        let status = Command::new(&editor).arg(&temp_path).status();
+
+        // Restore TUI
+        terminal::enable_raw_mode()?;
+
+        // Handle result
+        match status {
+            Ok(exit_status) if exit_status.success() => {
+                let edited = fs::read_to_string(&temp_path).unwrap_or(current_text);
+                self.frozen_text = edited;
+                self.live_transcription.lock().unwrap().clear();
+            }
+            _ => {
+                // Editor cancelled - restore original
+                self.frozen_text = current_text;
+                self.live_transcription.lock().unwrap().clear();
+            }
+        }
+
+        // Reset animation state
+        self.previous_transcription_len = 0;
+        self.animation_start_index = 0;
+        self.transcription_start_time = Instant::now();
+        self.is_ready.store(false, Ordering::SeqCst);
+
+        // Clean up
+        let _ = fs::remove_file(&temp_path);
+
+        // Restart recognition
+        let transcription = Arc::clone(&self.live_transcription);
+        let is_listening = Arc::clone(&self.is_listening);
+        let is_ready = Arc::clone(&self.is_ready);
+
+        self.recognizer = Some(SpeechRecognizer::new(
+            transcription,
+            is_listening,
+            is_ready,
+        )?);
+        self.recognizer.as_mut().unwrap().start()?;
+
+        Ok(())
     }
 }
 
@@ -226,15 +502,28 @@ fn run_app(app: &mut App) -> Result<()> {
         app.update_animation();
         app.update_transcription_state();
 
-        // Calculate needed height based on transcription length
-        let transcription = app.transcription.lock().unwrap().clone();
+        // Calculate needed height based on content and mode
         let terminal_width = terminal::size()?.0 as usize;
 
-        // Estimate lines needed: transcription + 1 line for status
-        let content_length = transcription.len();
-        let transcription_lines =
-            ((content_length as f32 / terminal_width as f32).ceil() as u16).max(1);
-        let needed_height = (transcription_lines + 1).min(10);
+        let content_lines: u16 = match app.mode {
+            AppMode::Recording => {
+                let full_transcription = app.full_transcription();
+                full_transcription
+                    .split('\n')
+                    .map(|line| ((line.len() as f32 / terminal_width as f32).ceil() as u16).max(1))
+                    .sum()
+            }
+            AppMode::Editing => {
+                // Textarea handles its own line count
+                app.textarea
+                    .lines()
+                    .iter()
+                    .map(|line| ((line.len() as f32 / terminal_width as f32).ceil() as u16).max(1))
+                    .sum::<u16>()
+                    .max(1)
+            }
+        };
+        let needed_height = (content_lines + 1).min(10); // +1 for status line
 
         // Recreate terminal if height changed
         if needed_height != last_height {
@@ -259,97 +548,169 @@ fn run_app(app: &mut App) -> Result<()> {
         // Draw inline
         if let Some(ref mut term) = terminal {
             term.draw(|f| {
-                let transcription = app.transcription.lock().unwrap().clone();
-                let elapsed_since_update =
-                    app.transcription_start_time.elapsed().as_millis() as f32;
-                let is_ready = app.is_ready.load(Ordering::SeqCst);
-                let is_listening = app.is_listening.load(Ordering::SeqCst);
-                let transcription_spans = build_transcription_spans(
-                    &transcription,
-                    elapsed_since_update,
-                    app.shimmer_offset,
-                    app.animation_start_index,
-                    is_ready,
-                    is_listening,
-                );
-
-                // Split area into transcription and status line
+                // Split area into main content and status line
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Min(1),    // Transcription
+                        Constraint::Min(1),    // Main content
                         Constraint::Length(1), // Status line
                     ])
                     .split(f.area());
 
-                // Render transcription with spinner at the start
-                let is_ready = app.is_ready.load(Ordering::SeqCst);
-                let is_listening = app.is_listening.load(Ordering::SeqCst);
-                let (spinner, spinner_style) = if !is_ready {
-                    // Warming up
-                    (
-                        WAITING_FRAMES[app.animation_frame],
-                        Style::default()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                } else if is_listening {
-                    // Ready and listening - subtle pulsing red dot
-                    let pulse_progress = (app.animation_frame as f32
-                        / LISTENING_FRAMES.len() as f32)
-                        * std::f32::consts::PI;
-                    let pulse = (pulse_progress.sin() + 1.0) / 2.0; // 0.0 to 1.0
+                match app.mode {
+                    AppMode::Recording => {
+                        let frozen_text = app.frozen_text.clone();
+                        let live_transcription = app.live_transcription.lock().unwrap().clone();
+                        let elapsed_since_update =
+                            app.transcription_start_time.elapsed().as_millis() as f32;
+                        let is_ready = app.is_ready.load(Ordering::SeqCst);
+                        let is_listening = app.is_listening.load(Ordering::SeqCst);
 
-                    // Subtle pulse - stays mostly bright red with gentle dimming
-                    let min_brightness = 200;
-                    let max_brightness = 255;
-                    let brightness = (min_brightness as f32
-                        + pulse * (max_brightness - min_brightness) as f32)
-                        as u8;
+                        // Build spans for frozen text (always white/settled)
+                        let frozen_spans = build_frozen_spans(&frozen_text);
 
-                    (
-                        "●",
-                        Style::default()
-                            .fg(Color::Rgb(brightness, 0, 0))
-                            .add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    // Not listening
-                    ("○", Style::default().fg(Color::DarkGray))
-                };
+                        // Build spans for live transcription (with animation)
+                        let live_spans = build_transcription_spans(
+                            &live_transcription,
+                            elapsed_since_update,
+                            app.shimmer_offset,
+                            app.animation_start_index,
+                            is_ready,
+                            is_listening,
+                            !frozen_text.is_empty(),
+                        );
 
-                let mut line_spans = vec![Span::styled(spinner, spinner_style), Span::raw(" ")];
-                line_spans.extend(transcription_spans);
+                        // Render transcription with spinner at the start
+                        let (spinner, spinner_style) = if app.is_paused {
+                            // Paused - gray hollow dot
+                            ("○", Style::default().fg(Color::DarkGray))
+                        } else if !is_ready {
+                            // Warming up - braille spinner
+                            (
+                                WAITING_FRAMES[app.animation_frame % WAITING_FRAMES.len()],
+                                Style::default()
+                                    .fg(Color::DarkGray)
+                                    .add_modifier(Modifier::BOLD),
+                            )
+                        } else if is_listening {
+                            // Recording - cycle through dot symbols in red
+                            (
+                                LISTENING_FRAMES[app.animation_frame % LISTENING_FRAMES.len()],
+                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                            )
+                        } else {
+                            // Not listening (recognition ended)
+                            ("○", Style::default().fg(Color::DarkGray))
+                        };
 
-                let transcription_para =
-                    Paragraph::new(Line::from(line_spans)).wrap(Wrap { trim: false });
-                f.render_widget(transcription_para, chunks[0]);
+                        let mut line_spans =
+                            vec![Span::styled(spinner, spinner_style), Span::raw(" ")];
+                        line_spans.extend(frozen_spans);
+                        line_spans.extend(live_spans);
 
-                // Render status line - only show controls when ready
-                let status_spans = if is_ready {
-                    vec![
-                        Span::styled(
-                            "Enter",
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(" finish • ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            "Ctrl+R",
-                            Style::default()
-                                .fg(Color::Blue)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(" restart • ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            "Ctrl+C",
-                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
-                    ]
-                } else {
-                    vec![]
+                        let transcription_para =
+                            Paragraph::new(Line::from(line_spans)).wrap(Wrap { trim: false });
+                        f.render_widget(transcription_para, chunks[0]);
+                    }
+                    AppMode::Editing => {
+                        // Render the textarea
+                        f.render_widget(&app.textarea, chunks[0]);
+                    }
+                }
+
+                // Render status line based on mode
+                let status_spans = match app.mode {
+                    AppMode::Recording => {
+                        let is_ready = app.is_ready.load(Ordering::SeqCst);
+                        if app.is_paused {
+                            vec![
+                                Span::styled(
+                                    "PAUSED",
+                                    Style::default()
+                                        .fg(Color::DarkGray)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" • ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(
+                                    "Space",
+                                    Style::default()
+                                        .fg(Color::Cyan)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" resume • ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(
+                                    "Enter",
+                                    Style::default()
+                                        .fg(Color::Yellow)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" finish • ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(
+                                    "Ctrl+E",
+                                    Style::default()
+                                        .fg(Color::Green)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" edit", Style::default().fg(Color::DarkGray)),
+                            ]
+                        } else if is_ready {
+                            vec![
+                                Span::styled(
+                                    "Enter",
+                                    Style::default()
+                                        .fg(Color::Yellow)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" finish • ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(
+                                    "Space",
+                                    Style::default()
+                                        .fg(Color::Cyan)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" pause • ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(
+                                    "Ctrl+E",
+                                    Style::default()
+                                        .fg(Color::Green)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" edit • ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(
+                                    "Ctrl+D",
+                                    Style::default()
+                                        .fg(Color::Blue)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" discard", Style::default().fg(Color::DarkGray)),
+                            ]
+                        } else {
+                            vec![]
+                        }
+                    }
+                    AppMode::Editing => {
+                        vec![
+                            Span::styled(
+                                "Ctrl+S",
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" done • ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(
+                                "Ctrl+E",
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" $EDITOR • ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(
+                                "Ctrl+D",
+                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" discard", Style::default().fg(Color::DarkGray)),
+                        ]
+                    }
                 };
 
                 let status_para = Paragraph::new(Line::from(status_spans));
@@ -372,44 +733,141 @@ fn run_app(app: &mut App) -> Result<()> {
         // Handle input with timeout
         if event::poll(tick_rate)? {
             if let Event::Key(key) = event::read()? {
-                match key {
-                    KeyEvent {
-                        code: KeyCode::Enter,
-                        modifiers: KeyModifiers::NONE,
-                        ..
-                    } => {
-                        app.stop_listening();
-                        app.should_quit = true;
-                        app.exit_code = 0;
-                    }
-                    KeyEvent {
-                        code: KeyCode::Char('c'),
-                        modifiers: KeyModifiers::CONTROL,
-                        ..
-                    } => {
-                        app.stop_listening();
-                        app.should_quit = true;
-                        app.exit_code = 130; // Standard Ctrl+C exit code
-                    }
-                    KeyEvent {
-                        code: KeyCode::Char('r'),
-                        modifiers: KeyModifiers::CONTROL,
-                        ..
-                    } => {
-                        // Restart with fresh recognition session
-                        if let Err(e) = app.restart() {
-                            eprintln!("Failed to restart: {}", e);
-                            app.should_quit = true;
-                            app.exit_code = 1;
+                match app.mode {
+                    AppMode::Recording => {
+                        match key {
+                            KeyEvent {
+                                code: KeyCode::Enter,
+                                modifiers: KeyModifiers::NONE,
+                                ..
+                            } => {
+                                app.stop_listening();
+                                app.should_quit = true;
+                                app.exit_code = 0;
+                            }
+                            KeyEvent {
+                                code: KeyCode::Char('c'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } => {
+                                app.stop_listening();
+                                app.should_quit = true;
+                                app.exit_code = 130; // Standard Ctrl+C exit code
+                            }
+                            KeyEvent {
+                                code: KeyCode::Char('d'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } => {
+                                // Discard and restart with fresh recognition session
+                                if let Err(e) = app.restart() {
+                                    eprintln!("Failed to restart: {}", e);
+                                    app.should_quit = true;
+                                    app.exit_code = 1;
+                                }
+                            }
+                            KeyEvent {
+                                code: KeyCode::Char('e'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } => {
+                                // Enter inline edit mode
+                                app.enter_edit_mode();
+                            }
+                            KeyEvent {
+                                code: KeyCode::Char('E'),
+                                modifiers,
+                                ..
+                            } if modifiers.contains(KeyModifiers::CONTROL)
+                                && modifiers.contains(KeyModifiers::SHIFT) =>
+                            {
+                                // Direct to $EDITOR (power user shortcut)
+                                if let Err(e) = app.open_external_editor_direct() {
+                                    eprintln!("Failed to open editor: {}", e);
+                                    app.should_quit = true;
+                                    app.exit_code = 1;
+                                }
+                            }
+                            KeyEvent {
+                                code: KeyCode::Char(' '),
+                                modifiers: KeyModifiers::NONE,
+                                ..
+                            } => {
+                                // Toggle pause
+                                if let Err(e) = app.toggle_pause() {
+                                    eprintln!("Failed to toggle pause: {}", e);
+                                    app.should_quit = true;
+                                    app.exit_code = 1;
+                                }
+                            }
+                            _ => {}
                         }
                     }
-                    _ => {}
+                    AppMode::Editing => {
+                        match key {
+                            KeyEvent {
+                                code: KeyCode::Char('s'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } => {
+                                // Confirm edits and resume recording
+                                if let Err(e) = app.exit_edit_mode() {
+                                    eprintln!("Failed to exit edit mode: {}", e);
+                                    app.should_quit = true;
+                                    app.exit_code = 1;
+                                }
+                            }
+                            KeyEvent {
+                                code: KeyCode::Char('d'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            }
+                            | KeyEvent {
+                                code: KeyCode::Esc, ..
+                            } => {
+                                // Discard edits and resume recording
+                                if let Err(e) = app.cancel_edit_mode() {
+                                    eprintln!("Failed to cancel edit mode: {}", e);
+                                    app.should_quit = true;
+                                    app.exit_code = 1;
+                                }
+                            }
+                            KeyEvent {
+                                code: KeyCode::Char('e'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } => {
+                                // Escalate to external editor
+                                if let Err(e) = app.open_external_editor() {
+                                    eprintln!("Failed to open editor: {}", e);
+                                    app.should_quit = true;
+                                    app.exit_code = 1;
+                                }
+                            }
+                            _ => {
+                                // Forward all other keys to textarea
+                                app.textarea.input(key);
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 }
 
+/// Build spans for frozen (edited) text - always rendered as settled white
+fn build_frozen_spans(frozen_text: &str) -> Vec<Span<'_>> {
+    if frozen_text.is_empty() {
+        return vec![];
+    }
+    vec![Span::styled(
+        frozen_text,
+        Style::default().fg(Color::Rgb(255, 255, 255)),
+    )]
+}
+
+/// Build spans for live transcription with animation
 fn build_transcription_spans<'a>(
     transcription: &'a str,
     elapsed_since_update: f32,
@@ -417,12 +875,14 @@ fn build_transcription_spans<'a>(
     animation_start_index: usize,
     is_ready: bool,
     is_listening: bool,
+    has_frozen_text: bool,
 ) -> Vec<Span<'a>> {
     if transcription.is_empty() {
         if !is_ready {
             // Just show nothing during warmup, spinner is enough
             return vec![];
-        } else if is_listening {
+        } else if is_listening && !has_frozen_text {
+            // Only show placeholder if there's no frozen text
             return vec![Span::styled(
                 "Speak now...",
                 Style::default()
