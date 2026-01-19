@@ -103,11 +103,44 @@ impl InlineSurface {
     }
 
     /// Get changes for a single line (uses only absolute X positions, no Y)
+    #[allow(dead_code)]
     pub fn get_line_changes(&self, row: usize) -> Vec<Change> {
         if row >= self.height {
             return Vec::new();
         }
         self.diff_line_x_only(&self.lines[row], &self.prev_lines[row])
+    }
+
+    /// Get all content for a single line (full repaint, no diff)
+    /// Assumes cursor is already at start of line (column 0)
+    pub fn get_line_content(&self, row: usize) -> Vec<Change> {
+        if row >= self.height {
+            return Vec::new();
+        }
+        let mut changes = Vec::new();
+        let mut current_attrs: Option<CellAttributes> = None;
+
+        for cell in self.lines[row].visible_cells() {
+            // Update attributes if needed
+            let cell_attrs = cell.attrs();
+            let need_attrs = match &current_attrs {
+                Some(a) => a != cell_attrs,
+                None => *cell_attrs != CellAttributes::default(),
+            };
+            if need_attrs {
+                changes.push(Change::AllAttributes(cell_attrs.clone()));
+                current_attrs = Some(cell_attrs.clone());
+            }
+
+            changes.push(Change::Text(cell.str().to_string()));
+        }
+
+        // Reset attributes at end of line
+        if current_attrs.is_some() {
+            changes.push(Change::AllAttributes(CellAttributes::default()));
+        }
+
+        changes
     }
 
     /// Diff a single line, only using X position (no Y positioning)
@@ -336,22 +369,15 @@ impl<T: Terminal> InlineTerminal<T> {
 
         // Render each line
         for row in 0..height {
-            // Get changes for this line only
-            let line_changes = self.surface.get_line_changes(row);
+            // Position at start of this line
+            changes.push(Change::CursorPosition {
+                x: Position::Absolute(0),
+                y: if row == 0 { Position::Relative(0) } else { Position::Relative(1) },
+            });
 
-            // Position at start of this line (relative from where we are)
-            if row > 0 {
-                changes.push(Change::CursorPosition {
-                    x: Position::Absolute(0),
-                    y: Position::Relative(1),
-                });
-            }
-
-            // Clear the line first
+            // Clear the line first, then draw all content
             changes.push(Change::ClearToEndOfLine(ColorAttribute::Default));
-
-            // Apply the line changes (these use absolute X positions)
-            changes.extend(line_changes);
+            changes.extend(self.surface.get_line_content(row));
         }
 
         // After rendering, cursor is at row (height-1)
