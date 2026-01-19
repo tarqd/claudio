@@ -36,7 +36,7 @@ use speech::SpeechRecognizer;
 const LISTENING_FRAMES: [&str; 3] = ["●", "◎", "◉"];
 const WAITING_FRAMES: [&str; 12] = ["⠋", "⠙", "⠹", "⠸", "⢰", "⣰", "⣠", "⣄", "⣆", "⡆", "⠇", "⠏"];
 const CHAR_DELAY_MS: f32 = 20.0; // Delay between each character appearing
-const SHIMMER_SPEED: f32 = 1.0;  // Speed of the shimmer wave (slower = more subtle)
+const SHIMMER_SPEED: f32 = 1.0; // Speed of the shimmer wave (slower = more subtle)
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppMode {
@@ -94,7 +94,11 @@ impl<'a> App<'a> {
         let is_listening = Arc::clone(&self.is_listening);
         let is_ready = Arc::clone(&self.is_ready);
 
-        self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
+        self.recognizer = Some(SpeechRecognizer::new(
+            transcription,
+            is_listening,
+            is_ready,
+        )?);
         self.recognizer.as_mut().unwrap().start()?;
 
         Ok(())
@@ -126,7 +130,11 @@ impl<'a> App<'a> {
         let is_listening = Arc::clone(&self.is_listening);
         let is_ready = Arc::clone(&self.is_ready);
 
-        self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
+        self.recognizer = Some(SpeechRecognizer::new(
+            transcription,
+            is_listening,
+            is_ready,
+        )?);
         self.recognizer.as_mut().unwrap().start()?;
 
         Ok(())
@@ -472,7 +480,7 @@ fn run_app(app: &mut App) -> Result<()> {
         // Calculate needed height based on content and mode
         let terminal_width = terminal::size()?.0 as usize;
 
-        let content_lines: u16 = match app.mode {
+let content_lines: u16 = match app.mode {
             AppMode::Recording => {
                 let full_transcription = app.full_transcription();
                 full_transcription
