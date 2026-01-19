@@ -267,7 +267,8 @@ impl InlineSurface {
 pub struct InlineTerminal<T: Terminal> {
     terminal: T,
     surface: InlineSurface,
-    rendered_lines: usize,
+    rendered_height: usize,  // Height of region we've rendered
+    cursor_row: usize,       // Row cursor is at after render (0 = top of region)
 }
 
 impl<T: Terminal> InlineTerminal<T> {
@@ -278,7 +279,8 @@ impl<T: Terminal> InlineTerminal<T> {
         Ok(Self {
             terminal,
             surface,
-            rendered_lines: 0,
+            rendered_height: 0,
+            cursor_row: 0,
         })
     }
 
@@ -319,18 +321,18 @@ impl<T: Terminal> InlineTerminal<T> {
     pub fn render_with_cursor(&mut self, cursor_pos: Option<(usize, usize)>) -> Result<()> {
         let mut changes = Vec::new();
 
-        // Move cursor up to our rendering region if we've rendered before
-        if self.rendered_lines > 0 {
+        let (_, height) = self.surface.dimensions();
+
+        // Move cursor up to row 0 of our region (from wherever cursor was left)
+        if self.rendered_height > 0 && self.cursor_row > 0 {
             changes.push(Change::CursorPosition {
                 x: Position::Absolute(0),
-                y: Position::Relative(-(self.rendered_lines as isize)),
+                y: Position::Relative(-(self.cursor_row as isize)),
             });
         }
 
         // Hide cursor during render
         changes.push(Change::CursorVisibility(CursorVisibility::Hidden));
-
-        let (_, height) = self.surface.dimensions();
 
         // Render each line
         for row in 0..height {
@@ -352,8 +354,9 @@ impl<T: Terminal> InlineTerminal<T> {
             changes.extend(line_changes);
         }
 
+        // After rendering, cursor is at row (height-1)
         // Position cursor and show it if requested
-        if let Some((col, row)) = cursor_pos {
+        let final_row = if let Some((col, row)) = cursor_pos {
             // Move to cursor position (relative from end of last line)
             let rows_back = height.saturating_sub(1).saturating_sub(row);
             changes.push(Change::CursorPosition {
@@ -361,22 +364,19 @@ impl<T: Terminal> InlineTerminal<T> {
                 y: Position::Relative(-(rows_back as isize)),
             });
             changes.push(Change::CursorVisibility(CursorVisibility::Visible));
+            row
         } else {
-            // Move back to start of our region, cursor stays hidden
-            if height > 0 {
-                changes.push(Change::CursorPosition {
-                    x: Position::Absolute(0),
-                    y: Position::Relative(-((height - 1) as isize)),
-                });
-            }
-        }
+            // Leave cursor at last row (don't move back to start)
+            height.saturating_sub(1)
+        };
 
         // Render to terminal
         self.terminal.render(&changes).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // Commit the surface state
         self.surface.commit();
-        self.rendered_lines = height;
+        self.rendered_height = height;
+        self.cursor_row = final_row;
 
         Ok(())
     }
@@ -391,18 +391,18 @@ impl<T: Terminal> InlineTerminal<T> {
     pub fn cleanup(&mut self) -> Result<()> {
         let mut changes = Vec::new();
 
-        // Move to start of our region
-        if self.rendered_lines > 0 {
+        // Move to start of our region (from current cursor_row)
+        if self.rendered_height > 0 && self.cursor_row > 0 {
             changes.push(Change::CursorPosition {
                 x: Position::Absolute(0),
-                y: Position::Relative(-(self.rendered_lines as isize)),
+                y: Position::Relative(-(self.cursor_row as isize)),
             });
         }
 
         // Clear each line
-        for i in 0..self.rendered_lines {
+        for i in 0..self.rendered_height {
             changes.push(Change::ClearToEndOfLine(ColorAttribute::Default));
-            if i < self.rendered_lines - 1 {
+            if i < self.rendered_height - 1 {
                 changes.push(Change::CursorPosition {
                     x: Position::Absolute(0),
                     y: Position::Relative(1),
@@ -410,11 +410,11 @@ impl<T: Terminal> InlineTerminal<T> {
             }
         }
 
-        // Move back to start
-        if self.rendered_lines > 1 {
+        // Move back to start of where our region was
+        if self.rendered_height > 1 {
             changes.push(Change::CursorPosition {
                 x: Position::Absolute(0),
-                y: Position::Relative(-((self.rendered_lines - 1) as isize)),
+                y: Position::Relative(-((self.rendered_height - 1) as isize)),
             });
         }
 
@@ -422,7 +422,8 @@ impl<T: Terminal> InlineTerminal<T> {
         changes.push(Change::CursorVisibility(CursorVisibility::Visible));
 
         self.terminal.render(&changes).map_err(|e| anyhow::anyhow!("{}", e))?;
-        self.rendered_lines = 0;
+        self.rendered_height = 0;
+        self.cursor_row = 0;
 
         Ok(())
     }
