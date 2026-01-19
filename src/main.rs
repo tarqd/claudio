@@ -291,6 +291,72 @@ impl<'a> App<'a> {
         // Stay in edit mode
         Ok(())
     }
+
+    /// Opens $EDITOR directly from recording mode (Ctrl+Shift+E).
+    /// Bypasses inline edit mode for power users.
+    fn open_external_editor_direct(&mut self) -> Result<()> {
+        // Stop recognition
+        self.stop_listening();
+
+        // Get current transcription
+        let current_text = self.full_transcription();
+
+        // Write to temp file
+        let temp_path = env::temp_dir().join("claudio_edit.txt");
+        fs::write(&temp_path, &current_text)?;
+
+        // Suspend TUI
+        terminal::disable_raw_mode()?;
+        execute!(
+            stderr(),
+            cursor::MoveUp(self.viewport_height),
+            Clear(ClearType::FromCursorDown)
+        )?;
+
+        // Find editor
+        let editor = env::var("VISUAL")
+            .or_else(|_| env::var("EDITOR"))
+            .unwrap_or_else(|_| "vi".to_string());
+
+        // Spawn editor and wait
+        let status = Command::new(&editor).arg(&temp_path).status();
+
+        // Restore TUI
+        terminal::enable_raw_mode()?;
+
+        // Handle result
+        match status {
+            Ok(exit_status) if exit_status.success() => {
+                let edited = fs::read_to_string(&temp_path).unwrap_or(current_text);
+                self.frozen_text = edited;
+                self.live_transcription.lock().unwrap().clear();
+            }
+            _ => {
+                // Editor cancelled - restore original
+                self.frozen_text = current_text;
+                self.live_transcription.lock().unwrap().clear();
+            }
+        }
+
+        // Reset animation state
+        self.previous_transcription_len = 0;
+        self.animation_start_index = 0;
+        self.transcription_start_time = Instant::now();
+        self.is_ready.store(false, Ordering::SeqCst);
+
+        // Clean up
+        let _ = fs::remove_file(&temp_path);
+
+        // Restart recognition
+        let transcription = Arc::clone(&self.live_transcription);
+        let is_listening = Arc::clone(&self.is_listening);
+        let is_ready = Arc::clone(&self.is_ready);
+
+        self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
+        self.recognizer.as_mut().unwrap().start()?;
+
+        Ok(())
+    }
 }
 
 fn main() -> Result<()> {
@@ -568,6 +634,18 @@ fn run_app(app: &mut App) -> Result<()> {
                             } => {
                                 // Enter inline edit mode
                                 app.enter_edit_mode();
+                            }
+                            KeyEvent {
+                                code: KeyCode::Char('E'),
+                                modifiers,
+                                ..
+                            } if modifiers.contains(KeyModifiers::CONTROL) && modifiers.contains(KeyModifiers::SHIFT) => {
+                                // Direct to $EDITOR (power user shortcut)
+                                if let Err(e) = app.open_external_editor_direct() {
+                                    eprintln!("Failed to open editor: {}", e);
+                                    app.should_quit = true;
+                                    app.exit_code = 1;
+                                }
                             }
                             _ => {}
                         }
