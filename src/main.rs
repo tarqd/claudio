@@ -305,8 +305,7 @@ fn handle_listening_input(app: &mut App, ui: &mut Ui, key: termwiz::input::KeyEv
             let text = ui.full_text().to_string();
             match open_editor(&text) {
                 Ok(edited) => {
-                    ui.reset();
-                    ui.set_text(&edited, app.start_time.elapsed().as_millis() as f32);
+                    ui.set_frozen_text(edited);
                     app.should_quit = true;
                     app.exit_code = 0;
                 }
@@ -340,9 +339,7 @@ fn handle_editing_input(app: &mut App, ui: &mut Ui, key: termwiz::input::KeyEven
             let text = ui.full_text().to_string();
             match open_editor(&text) {
                 Ok(edited) => {
-                    ui.reset();
-                    ui.set_text(&edited, app.start_time.elapsed().as_millis() as f32);
-                    ui.finish_editing_with_freeze();
+                    ui.set_frozen_text(edited);
                     ui.ensure_trailing_space();
                     app.transcription.lock().unwrap().clear();
                     app.start_listening()?;

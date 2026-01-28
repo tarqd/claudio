@@ -225,6 +225,16 @@ impl Ui {
         self.mode = Mode::Listening;
     }
 
+    /// Set frozen text directly (for external editor results)
+    pub fn set_frozen_text(&mut self, text: String) {
+        self.frozen_text = text;
+        self.text.clear();
+        self.stable_len = 0;
+        self.animation_start_ms = 0.0;
+        self.cursor_pos = 0;
+        self.mode = Mode::Listening;
+    }
+
     // --- Editing mode ---
 
     /// Enter editing mode - combines all text into frozen for editing
