@@ -5,10 +5,9 @@ edition = "2021"
 description = "Voice-to-text CLI with native speech recognition"
 
 [dependencies]
-# TUI
-ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
-tachyonfx = "0.9"
-crossterm = { version = "0.28", features = ["event-stream"] }
+# TUI - using termwiz directly for simpler inline rendering
+# termwiz natively uses /dev/tty on Unix and CONIN$/CONOUT$ on Windows
+termwiz = "0.22"
 
 # Error handling
 anyhow = "1.0"
