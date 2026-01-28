@@ -266,7 +266,11 @@ impl InlineSurface {
     /// Force a full repaint on next render
     pub fn invalidate(&mut self) {
         for line in &mut self.prev_lines {
-            line.fill_range(0..self.width, &Cell::new('\x00', CellAttributes::default()), 0);
+            line.fill_range(
+                0..self.width,
+                &Cell::new('\x00', CellAttributes::default()),
+                0,
+            );
         }
     }
 
@@ -304,15 +308,17 @@ impl InlineSurface {
 pub struct InlineTerminal<T: Terminal> {
     terminal: T,
     surface: InlineSurface,
-    rendered_height: usize,  // Height of region we've rendered
-    cursor_row: usize,       // Row cursor is at after render (0 = top of region)
-    pending_resize: Option<(usize, Instant)>,  // (new_width, detected_at) for debouncing
+    rendered_height: usize, // Height of region we've rendered
+    cursor_row: usize,      // Row cursor is at after render (0 = top of region)
+    pending_resize: Option<(usize, Instant)>, // (new_width, detected_at) for debouncing
 }
 
 impl<T: Terminal> InlineTerminal<T> {
     /// Create a new inline terminal with a fixed height
     pub fn new(mut terminal: T, height: usize) -> Result<Self> {
-        let size = terminal.get_screen_size().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let size = terminal
+            .get_screen_size()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let surface = InlineSurface::new(size.cols, height);
         Ok(Self {
             terminal,
@@ -337,7 +343,10 @@ impl<T: Terminal> InlineTerminal<T> {
     /// Returns true if resize was applied, false otherwise.
     /// Use `is_resizing()` to check if rendering should be paused.
     pub fn check_for_resize(&mut self) -> Result<bool> {
-        let size = self.terminal.get_screen_size().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let size = self
+            .terminal
+            .get_screen_size()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let (current_width, height) = self.surface.dimensions();
 
         // Check if terminal width changed from what we're rendering at
@@ -360,7 +369,9 @@ impl<T: Terminal> InlineTerminal<T> {
                     for _ in 0..self.rendered_height {
                         changes.push(Change::Text("\n".to_string()));
                     }
-                    self.terminal.render(&changes).map_err(|e| anyhow::anyhow!("{}", e))?;
+                    self.terminal
+                        .render(&changes)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
                 }
 
                 self.surface.resize(new_width, height);
@@ -412,7 +423,11 @@ impl<T: Terminal> InlineTerminal<T> {
             for i in 0..old_height {
                 changes.push(Change::CursorPosition {
                     x: Position::Absolute(0),
-                    y: if i == 0 { Position::Relative(0) } else { Position::Relative(1) },
+                    y: if i == 0 {
+                        Position::Relative(0)
+                    } else {
+                        Position::Relative(1)
+                    },
                 });
                 changes.push(Change::ClearToEndOfLine(ColorAttribute::Default));
             }
@@ -450,7 +465,11 @@ impl<T: Terminal> InlineTerminal<T> {
             // Position at start of this line
             changes.push(Change::CursorPosition {
                 x: Position::Absolute(0),
-                y: if row == 0 { Position::Relative(0) } else { Position::Relative(1) },
+                y: if row == 0 {
+                    Position::Relative(0)
+                } else {
+                    Position::Relative(1)
+                },
             });
 
             // Draw content (line already cleared above or is new space)
@@ -474,7 +493,9 @@ impl<T: Terminal> InlineTerminal<T> {
         };
 
         // Render to terminal
-        self.terminal.render(&changes).map_err(|e| anyhow::anyhow!("{}", e))?;
+        self.terminal
+            .render(&changes)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // Commit the surface state
         self.surface.commit();
@@ -524,7 +545,9 @@ impl<T: Terminal> InlineTerminal<T> {
         // Show cursor
         changes.push(Change::CursorVisibility(CursorVisibility::Visible));
 
-        self.terminal.render(&changes).map_err(|e| anyhow::anyhow!("{}", e))?;
+        self.terminal
+            .render(&changes)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         self.rendered_height = 0;
         self.cursor_row = 0;
 
