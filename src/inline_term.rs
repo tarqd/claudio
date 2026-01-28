@@ -163,7 +163,7 @@ impl InlineSurface {
 
             // Check if cells differ
             let differs = match (cell, prev_cell) {
-                (Some(c), Some(p)) => !c.same_contents(&p),
+                (Some(c), Some(p)) => !c.same_contents(p),
                 (Some(_), None) | (None, Some(_)) => true,
                 (None, None) => false,
             };
@@ -218,7 +218,7 @@ impl InlineSurface {
 
             // Check if cells differ
             let differs = match (cell, prev_cell) {
-                (Some(c), Some(p)) => !c.same_contents(&p),
+                (Some(c), Some(p)) => !c.same_contents(p),
                 (Some(_), None) | (None, Some(_)) => true,
                 (None, None) => false,
             };

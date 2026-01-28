@@ -347,15 +347,14 @@ impl Ui {
         let first_line_width = width.saturating_sub(2);
         let char_count = self.total_char_count();
 
-        let content_lines = if char_count == 0 || first_line_width == 0 {
-            1
-        } else if char_count <= first_line_width {
-            1
-        } else {
-            // First line fills, then full-width lines
-            let remaining = char_count - first_line_width;
-            1 + (remaining + width - 1) / width
-        };
+        let content_lines =
+            if char_count == 0 || first_line_width == 0 || char_count <= first_line_width {
+                1
+            } else {
+                // First line fills, then full-width lines
+                let remaining = char_count - first_line_width;
+                1 + remaining.div_ceil(width)
+            };
 
         // Add controls line if visible
         if self.show_controls {
@@ -487,6 +486,7 @@ impl Ui {
     }
 
     /// Render a single character, handling wrapping. Returns false if we've exceeded max_rows.
+    #[allow(clippy::too_many_arguments)]
     fn render_char(
         &self,
         surface: &mut InlineSurface,
@@ -532,6 +532,7 @@ impl Ui {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_text(
         &self,
         surface: &mut InlineSurface,
@@ -666,9 +667,7 @@ impl Ui {
     }
 
     fn rgb(&self, r: f32, g: f32, b: f32) -> ColorAttribute {
-        ColorAttribute::TrueColorWithDefaultFallback(
-            termwiz::color::SrgbaTuple(r, g, b, 1.0).into(),
-        )
+        ColorAttribute::TrueColorWithDefaultFallback(termwiz::color::SrgbaTuple(r, g, b, 1.0))
     }
 
     fn white_color(&self) -> ColorAttribute {

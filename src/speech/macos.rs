@@ -19,6 +19,9 @@ use objc2_speech::{
 };
 use std::ptr::NonNull;
 
+type TapBlock = RcBlock<dyn Fn(NonNull<AVAudioPCMBuffer>, NonNull<AVAudioTime>)>;
+type RecognitionHandler = RcBlock<dyn Fn(*mut SFSpeechRecognitionResult, *mut NSError)>;
+
 pub struct SpeechRecognizerImpl {
     recognizer: Retained<SFSpeechRecognizer>,
     audio_engine: Retained<AVAudioEngine>,
@@ -28,8 +31,8 @@ pub struct SpeechRecognizerImpl {
     is_listening: Arc<AtomicBool>,
     is_ready: Arc<AtomicBool>,
     // Keep blocks alive
-    _tap_block: Option<RcBlock<dyn Fn(NonNull<AVAudioPCMBuffer>, NonNull<AVAudioTime>)>>,
-    _handler: Option<RcBlock<dyn Fn(*mut SFSpeechRecognitionResult, *mut NSError)>>,
+    _tap_block: Option<TapBlock>,
+    _handler: Option<RecognitionHandler>,
 }
 
 impl SpeechRecognizerImpl {
