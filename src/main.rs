@@ -96,7 +96,11 @@ impl App {
         let is_listening = Arc::clone(&self.is_listening);
         let is_ready = Arc::clone(&self.is_ready);
 
-        self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
+        self.recognizer = Some(SpeechRecognizer::new(
+            transcription,
+            is_listening,
+            is_ready,
+        )?);
         self.recognizer.as_mut().unwrap().start()?;
         Ok(())
     }
@@ -118,7 +122,11 @@ impl App {
         let is_listening = Arc::clone(&self.is_listening);
         let is_ready = Arc::clone(&self.is_ready);
 
-        self.recognizer = Some(SpeechRecognizer::new(transcription, is_listening, is_ready)?);
+        self.recognizer = Some(SpeechRecognizer::new(
+            transcription,
+            is_listening,
+            is_ready,
+        )?);
         self.recognizer.as_mut().unwrap().start()?;
         Ok(())
     }
