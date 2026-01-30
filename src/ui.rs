@@ -13,6 +13,7 @@ use crate::inline_term::InlineSurface;
 
 // Animation constants
 const LOADING_FRAMES: [&str; 12] = ["⠋", "⠙", "⠹", "⠸", "⢰", "⣰", "⣠", "⣄", "⣆", "⡆", "⠇", "⠏"];
+const RECORDING_FRAMES: [&str; 3] = ["●", "◎", "◉"];
 const CHAR_FADE_DELAY_MS: f32 = 20.0;
 const CHAR_FADE_DURATION_MS: f32 = 1500.0;
 
@@ -42,16 +43,57 @@ struct Control {
 }
 
 const CONTROLS_LISTENING: &[Control] = &[
-    Control { key: "Enter", label: "finish", short: "fin", color: 3 },
-    Control { key: "^E", label: "edit", short: "edt", color: 5 },
-    Control { key: "^R", label: "restart", short: "rst", color: 4 },
-    Control { key: "^C", label: "cancel", short: "esc", color: 1 },
+    Control {
+        key: "Enter",
+        label: "submit",
+        short: "sub",
+        color: 3,
+    },
+    Control {
+        key: "^E",
+        label: "edit",
+        short: "edt",
+        color: 5,
+    },
+    Control {
+        key: "^D",
+        label: "discard",
+        short: "dis",
+        color: 4,
+    },
+    Control {
+        key: "^C",
+        label: "cancel",
+        short: "esc",
+        color: 1,
+    },
 ];
 
 const CONTROLS_EDITING: &[Control] = &[
-    Control { key: "Enter", label: "done", short: "done", color: 3 },
-    Control { key: "Esc", label: "cancel", short: "esc", color: 1 },
-    Control { key: "←→", label: "move", short: "mv", color: 8 },
+    Control {
+        key: "^S",
+        label: "save",
+        short: "sav",
+        color: 3,
+    },
+    Control {
+        key: "^E",
+        label: "editor",
+        short: "edt",
+        color: 5,
+    },
+    Control {
+        key: "^D",
+        label: "discard",
+        short: "dis",
+        color: 1,
+    },
+    Control {
+        key: "←→",
+        label: "move",
+        short: "mv",
+        color: 8,
+    },
 ];
 
 /// Main UI state and renderer
@@ -113,7 +155,8 @@ impl Ui {
         }
 
         // Find first differing character between current text and new text
-        let common_prefix_len = self.text
+        let common_prefix_len = self
+            .text
             .chars()
             .zip(text.chars())
             .take_while(|(a, b)| a == b)
@@ -175,6 +218,16 @@ impl Ui {
     /// Full reset (for restart)
     pub fn reset(&mut self) {
         self.frozen_text.clear();
+        self.text.clear();
+        self.stable_len = 0;
+        self.animation_start_ms = 0.0;
+        self.cursor_pos = 0;
+        self.mode = Mode::Listening;
+    }
+
+    /// Set frozen text directly (for external editor results)
+    pub fn set_frozen_text(&mut self, text: String) {
+        self.frozen_text = text;
         self.text.clear();
         self.stable_len = 0;
         self.animation_start_ms = 0.0;
@@ -294,15 +347,14 @@ impl Ui {
         let first_line_width = width.saturating_sub(2);
         let char_count = self.total_char_count();
 
-        let content_lines = if char_count == 0 || first_line_width == 0 {
-            1
-        } else if char_count <= first_line_width {
-            1
-        } else {
-            // First line fills, then full-width lines
-            let remaining = char_count - first_line_width;
-            1 + (remaining + width - 1) / width
-        };
+        let content_lines =
+            if char_count == 0 || first_line_width == 0 || char_count <= first_line_width {
+                1
+            } else {
+                // First line fills, then full-width lines
+                let remaining = char_count - first_line_width;
+                1 + remaining.div_ceil(width)
+            };
 
         // Add controls line if visible
         if self.show_controls {
@@ -332,18 +384,34 @@ impl Ui {
 
         // Render spinner
         let (spinner_char, spinner_color) = self.spinner_glyph();
-        surface.set_cell(col, row, Cell::new_grapheme(spinner_char, self.attrs(spinner_color), None));
+        surface.set_cell(
+            col,
+            row,
+            Cell::new_grapheme(spinner_char, self.attrs(spinner_color), None),
+        );
         col += 1;
         surface.set_cell(col, row, Cell::new(' ', CellAttributes::default()));
         col += 1;
 
         // Reserve last row for controls if visible
-        let content_rows = if self.show_controls { height.saturating_sub(1) } else { height };
+        let content_rows = if self.show_controls {
+            height.saturating_sub(1)
+        } else {
+            height
+        };
 
         // Render content based on mode
         if self.is_empty() {
             if self.show_placeholder {
-                self.render_text(surface, "Speak now...", self.attrs(self.dim_color()), &mut row, &mut col, width, content_rows);
+                self.render_text(
+                    surface,
+                    "Speak now...",
+                    self.attrs(self.dim_color()),
+                    &mut row,
+                    &mut col,
+                    width,
+                    content_rows,
+                );
             }
         } else if self.mode == Mode::Editing {
             self.render_editable(surface, &mut row, &mut col, width, content_rows);
@@ -377,7 +445,15 @@ impl Ui {
         }
     }
 
-    fn render_transcription(&self, surface: &mut InlineSurface, elapsed_ms: f32, row: &mut usize, col: &mut usize, width: usize, max_rows: usize) {
+    fn render_transcription(
+        &self,
+        surface: &mut InlineSurface,
+        elapsed_ms: f32,
+        row: &mut usize,
+        col: &mut usize,
+        width: usize,
+        max_rows: usize,
+    ) {
         let relative_time = elapsed_ms - self.animation_start_ms;
         let white_attrs = self.attrs(self.white_color());
 
@@ -410,7 +486,17 @@ impl Ui {
     }
 
     /// Render a single character, handling wrapping. Returns false if we've exceeded max_rows.
-    fn render_char(&self, surface: &mut InlineSurface, ch: char, attrs: CellAttributes, row: &mut usize, col: &mut usize, width: usize, max_rows: usize) -> bool {
+    #[allow(clippy::too_many_arguments)]
+    fn render_char(
+        &self,
+        surface: &mut InlineSurface,
+        ch: char,
+        attrs: CellAttributes,
+        row: &mut usize,
+        col: &mut usize,
+        width: usize,
+        max_rows: usize,
+    ) -> bool {
         if *row >= max_rows {
             return false;
         }
@@ -428,7 +514,14 @@ impl Ui {
         true
     }
 
-    fn render_editable(&self, surface: &mut InlineSurface, row: &mut usize, col: &mut usize, width: usize, max_rows: usize) {
+    fn render_editable(
+        &self,
+        surface: &mut InlineSurface,
+        row: &mut usize,
+        col: &mut usize,
+        width: usize,
+        max_rows: usize,
+    ) {
         // In edit mode, render frozen_text in white (that's where edits happen)
         let attrs = self.attrs(self.white_color());
 
@@ -439,7 +532,17 @@ impl Ui {
         }
     }
 
-    fn render_text(&self, surface: &mut InlineSurface, text: &str, attrs: CellAttributes, row: &mut usize, col: &mut usize, width: usize, max_rows: usize) {
+    #[allow(clippy::too_many_arguments)]
+    fn render_text(
+        &self,
+        surface: &mut InlineSurface,
+        text: &str,
+        attrs: CellAttributes,
+        row: &mut usize,
+        col: &mut usize,
+        width: usize,
+        max_rows: usize,
+    ) {
         for ch in text.chars() {
             if *row >= max_rows || *col >= width {
                 break;
@@ -456,14 +559,18 @@ impl Ui {
         };
 
         // Calculate total width needed for full labels
-        let full_width: usize = controls.iter()
+        let full_width: usize = controls
+            .iter()
             .map(|c| c.key.len() + 1 + c.label.len() + 3) // "Key label • "
-            .sum::<usize>().saturating_sub(3); // No separator after last
+            .sum::<usize>()
+            .saturating_sub(3); // No separator after last
 
         // Calculate width for short labels
-        let short_width: usize = controls.iter()
+        let short_width: usize = controls
+            .iter()
             .map(|c| c.key.len() + 1 + c.short.len() + 3)
-            .sum::<usize>().saturating_sub(3);
+            .sum::<usize>()
+            .saturating_sub(3);
 
         let use_short = full_width > width && short_width <= width;
         let use_minimal = short_width > width;
@@ -475,7 +582,9 @@ impl Ui {
             if i > 0 && col < width {
                 let sep = if use_minimal { " " } else { " • " };
                 for ch in sep.chars() {
-                    if col >= width { break; }
+                    if col >= width {
+                        break;
+                    }
                     surface.set_cell(col, row, Cell::new(ch, self.attrs(self.dim_color())));
                     col += 1;
                 }
@@ -483,8 +592,14 @@ impl Ui {
 
             // Key
             for ch in ctrl.key.chars() {
-                if col >= width { break; }
-                surface.set_cell(col, row, Cell::new(ch, self.attrs(ColorAttribute::PaletteIndex(ctrl.color))));
+                if col >= width {
+                    break;
+                }
+                surface.set_cell(
+                    col,
+                    row,
+                    Cell::new(ch, self.attrs(ColorAttribute::PaletteIndex(ctrl.color))),
+                );
                 col += 1;
             }
 
@@ -497,7 +612,9 @@ impl Ui {
 
                 let label = if use_short { ctrl.short } else { ctrl.label };
                 for ch in label.chars() {
-                    if col >= width { break; }
+                    if col >= width {
+                        break;
+                    }
                     surface.set_cell(col, row, Cell::new(ch, self.attrs(self.dim_color())));
                     col += 1;
                 }
@@ -514,9 +631,8 @@ impl Ui {
                 (LOADING_FRAMES[idx], self.dim_color())
             }
             SpinnerState::Listening => {
-                let pulse = (self.spinner_frame as f32 / 4.0 * std::f32::consts::PI).sin();
-                let brightness = 200.0 + (pulse + 1.0) / 2.0 * 55.0;
-                ("●", self.rgb(brightness / 255.0, 0.0, 0.0))
+                let idx = (self.spinner_frame / 4) % RECORDING_FRAMES.len();
+                (RECORDING_FRAMES[idx], ColorAttribute::PaletteIndex(1))
             }
             SpinnerState::Idle => ("○", self.dim_color()),
         }
@@ -551,9 +667,7 @@ impl Ui {
     }
 
     fn rgb(&self, r: f32, g: f32, b: f32) -> ColorAttribute {
-        ColorAttribute::TrueColorWithDefaultFallback(
-            termwiz::color::SrgbaTuple(r, g, b, 1.0).into(),
-        )
+        ColorAttribute::TrueColorWithDefaultFallback(termwiz::color::SrgbaTuple(r, g, b, 1.0))
     }
 
     fn white_color(&self) -> ColorAttribute {

@@ -34,7 +34,47 @@ struct App {
     exit_code: i32,
     start_time: Instant,
     recognizer: Option<SpeechRecognizer>,
-    edit_original: String,  // Saved text when entering edit mode
+    edit_original: String, // Saved text when entering edit mode
+}
+
+/// Open text in external editor, returns edited text
+fn open_editor(text: &str) -> Result<String> {
+    use std::fs;
+    use std::io::Read;
+
+    // Create temporary file
+    let tmp_dir = env::temp_dir();
+    let tmp_path = tmp_dir.join(format!("claudio-{}.txt", std::process::id()));
+    fs::write(&tmp_path, text)?;
+
+    // Determine editor: $VISUAL > $EDITOR > platform defaults
+    let editor = env::var("VISUAL")
+        .or_else(|_| env::var("EDITOR"))
+        .unwrap_or_else(|_| {
+            if cfg!(target_os = "windows") {
+                "notepad".to_string()
+            } else {
+                "vi".to_string()
+            }
+        });
+
+    // Open editor
+    let status = Command::new(&editor).arg(&tmp_path).status()?;
+
+    if !status.success() {
+        fs::remove_file(&tmp_path)?;
+        return Err(anyhow::anyhow!("Editor exited with non-zero status"));
+    }
+
+    // Read edited content
+    let mut file = fs::File::open(&tmp_path)?;
+    let mut edited = String::new();
+    file.read_to_string(&mut edited)?;
+
+    // Clean up
+    fs::remove_file(&tmp_path)?;
+
+    Ok(edited.trim_end().to_string())
 }
 
 impl App {
@@ -139,7 +179,9 @@ fn run_app(app: &mut App) -> Result<String> {
     let mut term = InlineTerminal::new(terminal, MIN_LINES)?;
 
     // Raw mode for immediate keys, no alternate screen for inline rendering
-    term.terminal().set_raw_mode().map_err(|e| anyhow::anyhow!("{}", e))?;
+    term.terminal()
+        .set_raw_mode()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // Initialize UI
     let mut ui = Ui::new();
@@ -193,14 +235,20 @@ fn run_app(app: &mut App) -> Result<String> {
         if app.should_quit {
             // Clean up the UI
             term.cleanup()?;
-            term.terminal().set_cooked_mode().map_err(|e| anyhow::anyhow!("{}", e))?;
+            term.terminal()
+                .set_cooked_mode()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             // Return the final transcription for output
             return Ok(ui.full_text().to_string());
         }
 
         // Poll input
-        if let Some(event) = term.terminal().poll_input(Some(tick_rate)).map_err(|e| anyhow::anyhow!("{}", e))? {
+        if let Some(event) = term
+            .terminal()
+            .poll_input(Some(tick_rate))
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+        {
             handle_input(app, &mut ui, event)?;
         }
     }
@@ -229,7 +277,7 @@ fn handle_listening_input(app: &mut App, ui: &mut Ui, key: termwiz::input::KeyEv
             app.should_quit = true;
             app.exit_code = 130;
         }
-        (KeyCode::Char('r'), Modifiers::CTRL) => {
+        (KeyCode::Char('d'), Modifiers::CTRL) => {
             ui.reset(); // Clear frozen state
             if let Err(e) = app.restart() {
                 eprintln!("Failed to restart: {}", e);
@@ -243,6 +291,23 @@ fn handle_listening_input(app: &mut App, ui: &mut Ui, key: termwiz::input::KeyEv
             app.stop_listening(); // Pause speech recognition while editing
             ui.start_editing();
         }
+        (KeyCode::Char('E'), Modifiers::CTRL | Modifiers::SHIFT) => {
+            // Open $EDITOR directly (hidden shortcut)
+            app.stop_listening();
+            let text = ui.full_text().to_string();
+            match open_editor(&text) {
+                Ok(edited) => {
+                    ui.set_frozen_text(edited);
+                    app.should_quit = true;
+                    app.exit_code = 0;
+                }
+                Err(e) => {
+                    eprintln!("Editor error: {}", e);
+                    app.should_quit = true;
+                    app.exit_code = 1;
+                }
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -251,7 +316,7 @@ fn handle_listening_input(app: &mut App, ui: &mut Ui, key: termwiz::input::KeyEv
 fn handle_editing_input(app: &mut App, ui: &mut Ui, key: termwiz::input::KeyEvent) -> Result<()> {
     match (key.key, key.modifiers) {
         // Confirm edit
-        (KeyCode::Enter, Modifiers::NONE) => {
+        (KeyCode::Char('s'), Modifiers::CTRL) => {
             // Finish editing and freeze the text (UI manages the buffers)
             ui.finish_editing_with_freeze();
             // Ensure trailing space for separation from new speech
@@ -261,8 +326,24 @@ fn handle_editing_input(app: &mut App, ui: &mut Ui, key: termwiz::input::KeyEven
             // Resume listening
             app.start_listening()?;
         }
-        // Cancel edit
-        (KeyCode::Escape, Modifiers::NONE) => {
+        // Escalate to $EDITOR
+        (KeyCode::Char('e'), Modifiers::CTRL) => {
+            let text = ui.full_text().to_string();
+            match open_editor(&text) {
+                Ok(edited) => {
+                    ui.set_frozen_text(edited);
+                    ui.ensure_trailing_space();
+                    app.transcription.lock().unwrap().clear();
+                    app.start_listening()?;
+                }
+                Err(e) => {
+                    eprintln!("Editor error: {}", e);
+                    // Stay in edit mode on error
+                }
+            }
+        }
+        // Discard edits
+        (KeyCode::Char('d'), Modifiers::CTRL) | (KeyCode::Escape, Modifiers::NONE) => {
             ui.cancel_editing(&app.edit_original);
             // Resume listening
             app.start_listening()?;
