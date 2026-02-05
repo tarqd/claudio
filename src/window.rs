@@ -17,7 +17,7 @@ use crate::speech::SpeechRecognizer;
 
 const WINDOW_WIDTH: f32 = 480.0;
 const WINDOW_MIN_HEIGHT: f32 = 80.0;
-const _WINDOW_MAX_HEIGHT: f32 = 400.0;
+const WINDOW_MAX_HEIGHT: f32 = 400.0;
 const CORNER_RADIUS: f32 = 12.0;
 const PADDING: f32 = 20.0;
 const FONT_SIZE: f32 = 16.0;
@@ -462,57 +462,103 @@ impl eframe::App for HudApp {
 
                 // Content area inside the panel
                 let content_rect = panel_rect.shrink(PADDING);
-                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content_rect), |ui| {
-                    match self.mode {
-                        HudMode::Listening => {
-                            if self.is_empty() {
-                                let placeholder = match self.state {
-                                    HudState::Loading => "Starting...",
-                                    HudState::Recording => "Speak now...",
-                                    HudState::Paused => "Paused",
-                                };
-                                ui.label(
-                                    egui::RichText::new(placeholder)
-                                        .font(FontId::new(FONT_SIZE, FontFamily::Proportional))
-                                        .color(self.placeholder_color(dark)),
-                                );
-                            } else {
-                                let layout = self.build_text_layout(dark, elapsed_ms);
-                                let response = ui.label(layout);
+                let glow_margin = GLOW_SPREAD * GLOW_LAYERS as f32;
+                let max_content_height = WINDOW_MAX_HEIGHT - PADDING * 2.0;
 
-                                // Click on text to enter edit mode
-                                if response.clicked() && self.state == HudState::Recording {
-                                    self.edit_buffer = self.full_text();
-                                    self.stop_listening();
-                                    self.mode = HudMode::Editing;
+                let inner_response = ui.allocate_new_ui(
+                    egui::UiBuilder::new().max_rect(content_rect),
+                    |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(max_content_height)
+                            .auto_shrink(true)
+                            .show(ui, |ui| {
+                                match self.mode {
+                                    HudMode::Listening => {
+                                        if self.is_empty() {
+                                            let placeholder = match self.state {
+                                                HudState::Loading => "Starting...",
+                                                HudState::Recording => "Speak now...",
+                                                HudState::Paused => "Paused",
+                                            };
+                                            ui.label(
+                                                egui::RichText::new(placeholder)
+                                                    .font(FontId::new(
+                                                        FONT_SIZE,
+                                                        FontFamily::Proportional,
+                                                    ))
+                                                    .color(self.placeholder_color(dark)),
+                                            );
+                                        } else {
+                                            let layout =
+                                                self.build_text_layout(dark, elapsed_ms);
+                                            let response = ui.label(layout);
+
+                                            // Click on text to enter edit mode
+                                            if response.clicked()
+                                                && self.state == HudState::Recording
+                                            {
+                                                self.edit_buffer = self.full_text();
+                                                self.stop_listening();
+                                                self.mode = HudMode::Editing;
+                                            }
+                                        }
+                                    }
+                                    HudMode::Editing => {
+                                        let text_col = self.text_color(dark);
+                                        let response = ui.add(
+                                            egui::TextEdit::multiline(
+                                                &mut self.edit_buffer,
+                                            )
+                                            .desired_width(f32::INFINITY)
+                                            .font(FontId::new(
+                                                FONT_SIZE,
+                                                FontFamily::Proportional,
+                                            ))
+                                            .frame(false)
+                                            .text_color(text_col),
+                                        );
+
+                                        // Auto-focus the text editor
+                                        if response.gained_focus()
+                                            || !response.has_focus()
+                                        {
+                                            response.request_focus();
+                                        }
+
+                                        // Hint at bottom
+                                        ui.add_space(8.0);
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "Cmd+Enter submit  •  Esc cancel",
+                                            )
+                                            .font(FontId::new(
+                                                12.0,
+                                                FontFamily::Proportional,
+                                            ))
+                                            .color(if dark { DARK_DIM } else { LIGHT_DIM }),
+                                        );
+                                    }
                                 }
-                            }
-                        }
-                        HudMode::Editing => {
-                            let text_col = self.text_color(dark);
-                            let response = ui.add(
-                                egui::TextEdit::multiline(&mut self.edit_buffer)
-                                    .desired_width(f32::INFINITY)
-                                    .font(FontId::new(FONT_SIZE, FontFamily::Proportional))
-                                    .frame(false)
-                                    .text_color(text_col),
-                            );
+                            });
+                    },
+                );
 
-                            // Auto-focus the text editor
-                            if response.gained_focus() || !response.has_focus() {
-                                response.request_focus();
-                            }
+                // Auto-resize window to fit content
+                let used_height = inner_response.response.rect.height();
+                let desired_panel_height =
+                    (used_height + PADDING * 2.0).clamp(WINDOW_MIN_HEIGHT, WINDOW_MAX_HEIGHT);
+                let desired_window_height = desired_panel_height + glow_margin * 2.0;
+                let desired_window_width = WINDOW_WIDTH + glow_margin * 2.0;
 
-                            // Hint at bottom
-                            ui.add_space(8.0);
-                            ui.label(
-                                egui::RichText::new("Cmd+Enter submit  •  Esc cancel")
-                                    .font(FontId::new(12.0, FontFamily::Proportional))
-                                    .color(if dark { DARK_DIM } else { LIGHT_DIM }),
-                            );
-                        }
-                    }
+                let current_size = ctx.input(|i| {
+                    i.viewport().inner_rect.map(|r| r.size()).unwrap_or(Vec2::ZERO)
                 });
+                let desired = Vec2::new(desired_window_width, desired_window_height);
+
+                // Only resize if the difference is meaningful (avoid jitter)
+                if (current_size.y - desired.y).abs() > 2.0 {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(desired));
+                }
 
                 // Window dragging — drag from any empty area
                 let response = ui.interact(
