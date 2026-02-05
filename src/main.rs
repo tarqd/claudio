@@ -21,6 +21,8 @@ use termwiz::terminal::{SystemTerminal, Terminal};
 mod inline_term;
 mod speech;
 mod ui;
+#[cfg(feature = "ui")]
+mod window;
 
 use inline_term::InlineTerminal;
 use speech::SpeechRecognizer;
@@ -134,6 +136,19 @@ impl App {
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
+
+    // Handle `claudio ui` subcommand (requires `ui` feature)
+    if args.get(1).map(|s| s.as_str()) == Some("ui") {
+        #[cfg(feature = "ui")]
+        return window::run_ui();
+
+        #[cfg(not(feature = "ui"))]
+        {
+            eprintln!("UI window mode is not enabled. Rebuild with: cargo build --features ui");
+            std::process::exit(1);
+        }
+    }
+
     let exec_command = args.iter().position(|a| a == "--").and_then(|pos| {
         if pos + 1 < args.len() {
             Some(args[pos + 1..].to_vec())
