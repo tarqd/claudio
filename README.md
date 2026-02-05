@@ -1,5 +1,7 @@
 # Claudio
 
+![demo](assets/demo.gif)
+
 A voice-to-text CLI tool that uses native speech recognition for real-time transcription with a beautiful terminal UI.
 
 ## Features
