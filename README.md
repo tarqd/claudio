@@ -22,11 +22,19 @@ A voice-to-text CLI tool that uses native speech recognition for real-time trans
 
 ## Installation
 
+### Homebrew (macOS)
+
+```bash
+brew install tarqd/tap/claudio
+```
+
+### From source
+
 ```bash
 cargo install --path .
 ```
 
-Or build from source:
+Or build manually:
 
 ```bash
 cargo build --release
