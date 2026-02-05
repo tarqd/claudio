@@ -1,20 +1,22 @@
 # Claudio
 
-A voice-to-text CLI tool for macOS that uses the Speech framework for real-time transcription with a beautiful terminal UI.
+A voice-to-text CLI tool that uses native speech recognition for real-time transcription with a beautiful terminal UI.
 
 ## Features
 
-- **Real-time transcription** using macOS Speech Recognition
+- **Real-time transcription** using native speech recognition
+- **Cross-platform** — macOS (Speech framework), Windows (Speech Recognition), Linux (Vosk)
 - **Elegant inline TUI** with animated text rendering
-- **Pipe to any command** for seamless integration with AI tools
+- **Pipe to any command** — stdout works cleanly with pipes
+- **Inline editing** — edit transcription in-place or open `$EDITOR`
 - **Visual feedback** with animated shimmer effects for unsettled text
 - **Minimal interface** that gets out of your way
 
 ## Requirements
 
-- macOS (uses the native Speech framework)
+- macOS, Windows, or Linux
 - Microphone access
-- Speech Recognition permissions
+- Speech Recognition permissions (macOS) or Vosk model (Linux)
 
 ## Installation
 
@@ -43,21 +45,39 @@ Press **Enter** to finish and output the transcription to stdout.
 
 ### Pipe to commands
 
-Use `--` to pipe the transcription directly to another command:
+Pipe the transcription directly to another command:
+
+```bash
+claudio | pbcopy                # Copy to clipboard
+claudio | claude "translate to Spanish"
+claudio | gh issue create --body-file -
+```
+
+The TUI renders via `/dev/tty`, so the interface displays normally while stdout flows cleanly to the next command.
+
+You can also use `--` to exec a command with the transcription as stdin:
 
 ```bash
 claudio -- claude "Summarize this in one sentence"
-claudio -- pbcopy  # Copy to clipboard
-claudio -- gh issue create --body-file -
 ```
-
-The TUI runs on stderr, so you see the interface while the transcription flows cleanly to the command's stdin.
 
 ## Controls
 
-- **Enter** - Finish recording and submit transcription
-- **Ctrl+R** - Clear and restart (keeps recording)
-- **Ctrl+C** - Cancel and exit
+### Recording
+
+- **Enter** — Finish recording and submit transcription
+- **Ctrl+D** — Clear and restart (keeps recording)
+- **Ctrl+E** — Enter inline editing mode
+- **Ctrl+Shift+E** — Open transcription in `$EDITOR`
+- **Ctrl+C** — Cancel and exit
+
+### Editing (after Ctrl+E)
+
+- **Ctrl+S** — Save edits and resume recording
+- **Ctrl+E** — Escalate to `$EDITOR`
+- **Ctrl+D** / **Escape** — Discard edits and resume recording
+- **Arrow keys**, **Home**, **End** — Navigate
+- **Backspace**, **Delete** — Edit text
 
 ## Visual States
 
@@ -68,18 +88,17 @@ The TUI runs on stderr, so you see the interface while the transcription flows c
 
 ## How it Works
 
-1. The app uses macOS Speech framework to capture and transcribe audio in real-time
+1. The app uses the platform's native speech recognition to capture and transcribe audio in real-time
 2. Text appears with a smooth fade-in animation as it's being transcribed
 3. Once confirmed by the recognition engine, text settles to bright white
-4. Press Enter to finalize and output/pipe the transcription
+4. Optionally edit the transcription inline (Ctrl+E) or in `$EDITOR` (Ctrl+Shift+E)
+5. Press Enter to finalize and output/pipe the transcription
 
 ## Permissions
 
-On first run, macOS will prompt you for:
-- Microphone access
-- Speech Recognition access
+**macOS** — On first run, grant both Microphone and Speech Recognition access when prompted.
 
-Grant both permissions for the app to work.
+**Linux** — Download a [Vosk model](https://alphacephei.com/vosk/models) and ensure your user has access to audio capture devices.
 
 ## Examples
 
@@ -87,17 +106,17 @@ Grant both permissions for the app to work.
 # Basic transcription
 claudio
 
-# Send to Claude AI
-claudio -- claude "translate to Spanish"
+# Pipe to Claude AI
+claudio | claude "translate to Spanish"
 
 # Create a git commit message
-claudio -- git commit -F -
+claudio | git commit -F -
 
 # Save to file
 claudio > notes.txt
 
-# Pipe to any command
-claudio -- pbcopy
+# Copy to clipboard
+claudio | pbcopy
 ```
 
 ## Building
@@ -107,10 +126,10 @@ cargo build --release
 ```
 
 The project uses:
-- `ratatui` for the terminal UI
-- `crossterm` for terminal control
-- `objc2-speech` for macOS Speech framework bindings
-- `objc2-avf-audio` for audio capture
+- `termwiz` for terminal rendering (uses `/dev/tty` directly, enabling piped stdout)
+- `objc2-speech` / `objc2-avf-audio` for macOS speech recognition
+- `windows` crate for Windows speech recognition
+- `vosk` / `cpal` for Linux speech recognition
 
 ## License
 
