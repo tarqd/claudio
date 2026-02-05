@@ -1,6 +1,6 @@
 [package]
 name = "claudio"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Voice-to-text CLI with native speech recognition"
 publish = false
