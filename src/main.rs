@@ -134,6 +134,13 @@ impl App {
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
+
+    // Handle `claudio ui` subcommand (macOS only, behind feature flag)
+    #[cfg(all(target_os = "macos", feature = "ui"))]
+    if args.get(1).map(|s| s.as_str()) == Some("ui") {
+        return launch_ui(&args);
+    }
+
     let exec_command = args.iter().position(|a| a == "--").and_then(|pos| {
         if pos + 1 < args.len() {
             Some(args[pos + 1..].to_vec())
@@ -368,4 +375,71 @@ fn handle_editing_input(app: &mut App, ui: &mut Ui, key: termwiz::input::KeyEven
         _ => {}
     }
     Ok(())
+}
+
+/// Launch the SwiftUI GUI mode (macOS only, behind `ui` feature flag).
+///
+/// Looks for the ClaudioUI app bundle in several locations:
+/// 1. Next to the claudio binary (for release installs)
+/// 2. In the claudio-ui build directory (for development)
+/// 3. In /Applications (for standalone installs)
+#[cfg(all(target_os = "macos", feature = "ui"))]
+fn launch_ui(args: &[String]) -> Result<()> {
+    use std::path::PathBuf;
+
+    let app_name = "ClaudioUI.app";
+    let binary_name = "ClaudioUI";
+
+    // Collect any args after `ui` to forward
+    let ui_args: Vec<&String> = args.iter().skip(2).collect();
+
+    // Search locations for the app bundle
+    let exe_dir = env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
+    let search_paths: Vec<PathBuf> = [
+        // Next to the claudio binary
+        exe_dir.as_ref().map(|d| d.join(app_name)),
+        // In a Resources dir next to binary (Homebrew-style)
+        exe_dir.as_ref().map(|d| d.join("../libexec").join(app_name)),
+        // Development build (swift build output)
+        exe_dir.as_ref().map(|d| {
+            d.join("../claudio-ui/.build/release")
+                .join(binary_name)
+        }),
+        // /Applications
+        Some(PathBuf::from("/Applications").join(app_name)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    // Try app bundle first (open -a), then bare binary
+    for path in &search_paths {
+        if !path.exists() {
+            continue;
+        }
+
+        if path.extension().map(|e| e == "app").unwrap_or(false) {
+            // Launch .app bundle via `open`
+            let mut cmd = Command::new("open");
+            cmd.arg("-a").arg(path).arg("--args");
+            for a in &ui_args {
+                cmd.arg(a);
+            }
+            let status = cmd.status()?;
+            std::process::exit(status.code().unwrap_or(0));
+        } else {
+            // Launch bare binary directly
+            let status = Command::new(path).args(&ui_args).status()?;
+            std::process::exit(status.code().unwrap_or(0));
+        }
+    }
+
+    eprintln!("ClaudioUI not found. Build it first:");
+    eprintln!("  cd claudio-ui && ./build.sh");
+    eprintln!();
+    eprintln!("Or install via: cargo install claudio --features ui");
+    std::process::exit(1);
 }

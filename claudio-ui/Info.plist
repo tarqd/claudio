@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.claudio.ui</string>
+    <key>CFBundleName</key>
+    <string>ClaudioUI</string>
+    <key>CFBundleDisplayName</key>
+    <string>Claudio</string>
+    <key>CFBundleExecutable</key>
+    <string>ClaudioUI</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.1</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>26.0</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Claudio needs microphone access to transcribe your speech in real-time.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Claudio uses on-device speech recognition to convert your speech to text.</string>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>

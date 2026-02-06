@@ -53,6 +53,10 @@ windows = { version = "0.58", features = [
 vosk = "0.3"
 cpal = "0.15"
 
+[features]
+default = []
+ui = []  # Enable `claudio ui` subcommand (macOS only, launches SwiftUI Liquid Glass GUI)
+
 [profile.release]
 opt-level = 3
 lto = true
