@@ -1,53 +1,84 @@
 #!/bin/bash
-# Build ClaudioUI as a macOS .app bundle
+# Build Claudio.app — a unified macOS app bundle containing:
+#   - ClaudioUI  (SwiftUI Liquid Glass GUI)
+#   - claudio    (Rust TUI CLI)
 #
 # Usage:
 #   ./build.sh          # Debug build
 #   ./build.sh release  # Release build
 #
-# Output: .build/{debug|release}/ClaudioUI.app
+# Output: build/Claudio.app
+#
+# After building:
+#   open build/Claudio.app          # Launch GUI
+#   build/Claudio.app/Contents/MacOS/claudio    # Run TUI
+#   ./install.sh                    # Install to /Applications + symlink CLI
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 CONFIG="${1:-debug}"
+SWIFT_FLAGS=""
+CARGO_FLAGS="--features ui"
 
 if [ "$CONFIG" = "release" ]; then
-    swift build -c release
-    BUILD_DIR=".build/release"
-else
-    swift build
-    BUILD_DIR=".build/debug"
+    SWIFT_FLAGS="-c release"
+    CARGO_FLAGS="--release --features ui"
 fi
 
-BINARY="$BUILD_DIR/ClaudioUI"
+echo "==> Building ClaudioUI (SwiftUI)..."
+cd "$SCRIPT_DIR"
+swift build $SWIFT_FLAGS
 
-if [ ! -f "$BINARY" ]; then
-    echo "Error: Build failed, binary not found at $BINARY"
+SWIFT_BUILD_DIR="$SCRIPT_DIR/.build/${CONFIG}"
+SWIFT_BINARY="$SWIFT_BUILD_DIR/ClaudioUI"
+
+if [ ! -f "$SWIFT_BINARY" ]; then
+    echo "Error: Swift build failed, binary not found at $SWIFT_BINARY"
     exit 1
 fi
 
-# Create .app bundle
-APP_DIR="$BUILD_DIR/ClaudioUI.app"
+echo "==> Building claudio (Rust TUI)..."
+cd "$ROOT_DIR"
+cargo build $CARGO_FLAGS
+
+if [ "$CONFIG" = "release" ]; then
+    RUST_BINARY="$ROOT_DIR/target/release/claudio"
+else
+    RUST_BINARY="$ROOT_DIR/target/debug/claudio"
+fi
+
+if [ ! -f "$RUST_BINARY" ]; then
+    echo "Error: Cargo build failed, binary not found at $RUST_BINARY"
+    exit 1
+fi
+
+# Create unified .app bundle
+APP_DIR="$SCRIPT_DIR/build/Claudio.app"
 CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
 
+echo "==> Assembling Claudio.app..."
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS"
 
-# Copy binary
-cp "$BINARY" "$MACOS/ClaudioUI"
+# Both binaries live in Contents/MacOS/
+cp "$SWIFT_BINARY" "$MACOS/ClaudioUI"
+cp "$RUST_BINARY"  "$MACOS/claudio"
 
-# Copy Info.plist
-cp Info.plist "$CONTENTS/Info.plist"
+# Info.plist — ClaudioUI is the main executable (for GUI launch via open/Finder)
+cp "$SCRIPT_DIR/Info.plist" "$CONTENTS/Info.plist"
 
 # Sign with entitlements (ad-hoc)
-codesign --force --sign - --entitlements ClaudioUI.entitlements "$APP_DIR"
+codesign --force --sign - --entitlements "$SCRIPT_DIR/ClaudioUI.entitlements" "$APP_DIR"
 
+echo ""
 echo "Built: $APP_DIR"
 echo ""
-echo "Run with:"
-echo "  open $APP_DIR"
-echo "  # or: claudio ui  (if claudio was built with --features ui)"
+echo "  open build/Claudio.app          # Launch Liquid Glass GUI"
+echo "  build/Claudio.app/Contents/MacOS/claudio          # Run TUI"
+echo "  build/Claudio.app/Contents/MacOS/claudio ui       # Launch GUI from CLI"
+echo ""
+echo "To install: ./install.sh"

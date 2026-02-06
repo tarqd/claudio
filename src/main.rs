@@ -379,29 +379,35 @@ fn handle_editing_input(app: &mut App, ui: &mut Ui, key: termwiz::input::KeyEven
 
 /// Launch the SwiftUI GUI mode (macOS only, behind `ui` feature flag).
 ///
-/// Looks for the ClaudioUI app bundle in several locations:
-/// 1. Next to the claudio binary (for release installs)
-/// 2. In the claudio-ui build directory (for development)
-/// 3. In /Applications (for standalone installs)
+/// Search order for the ClaudioUI binary/bundle:
+/// 1. Sibling binary in same dir (unified .app bundle: Contents/MacOS/claudio + ClaudioUI)
+/// 2. Sibling .app bundle next to claudio binary
+/// 3. Enclosing .app bundle (claudio is inside Claudio.app/Contents/MacOS/)
+/// 4. Homebrew libexec
+/// 5. Development build (claudio-ui/.build/release)
+/// 6. /Applications/Claudio.app
 #[cfg(all(target_os = "macos", feature = "ui"))]
 fn launch_ui(args: &[String]) -> Result<()> {
     use std::path::PathBuf;
 
-    let app_name = "ClaudioUI.app";
+    let app_name = "Claudio.app";
     let binary_name = "ClaudioUI";
 
     // Collect any args after `ui` to forward
     let ui_args: Vec<&String> = args.iter().skip(2).collect();
 
-    // Search locations for the app bundle
     let exe_dir = env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
 
     let search_paths: Vec<PathBuf> = [
-        // Next to the claudio binary
+        // Sibling binary (both live in Contents/MacOS/ of the unified .app)
+        exe_dir.as_ref().map(|d| d.join(binary_name)),
+        // Sibling .app bundle
         exe_dir.as_ref().map(|d| d.join(app_name)),
-        // In a Resources dir next to binary (Homebrew-style)
+        // Enclosing .app — claudio is Contents/MacOS/claudio, app is ../../
+        exe_dir.as_ref().map(|d| d.join("../..").join(app_name)),
+        // Homebrew libexec
         exe_dir.as_ref().map(|d| d.join("../libexec").join(app_name)),
         // Development build (swift build output)
         exe_dir.as_ref().map(|d| {
@@ -415,7 +421,6 @@ fn launch_ui(args: &[String]) -> Result<()> {
     .flatten()
     .collect();
 
-    // Try app bundle first (open -a), then bare binary
     for path in &search_paths {
         if !path.exists() {
             continue;
@@ -437,9 +442,10 @@ fn launch_ui(args: &[String]) -> Result<()> {
         }
     }
 
-    eprintln!("ClaudioUI not found. Build it first:");
+    eprintln!("ClaudioUI not found. Build it with:");
     eprintln!("  cd claudio-ui && ./build.sh");
     eprintln!();
-    eprintln!("Or install via: cargo install claudio --features ui");
+    eprintln!("Or install the app:");
+    eprintln!("  cd claudio-ui && ./install.sh");
     std::process::exit(1);
 }
